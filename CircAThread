@@ -1393,7 +1393,7 @@ footer{
         <div class="methods-box" style="font-style:normal">
           Topping AT et al. (2026). CircaThread: a browser-based suite for circadian treatment scheduling, trace visualisation, and rhythm parameter extraction from bioluminescence data. <em>[Journal name, in preparation]</em>.
         </div>
-        <p>A preprint and full citation will be added here on publication. In the meantime, you may refer to the tool as <strong>CircaThread v1 (Topping et al., 2026)</strong> with a URL to the hosted file or GitHub repository.</p>
+        <p>A preprint and full citation will be added here on publication. In the meantime, you may refer to the tool as <strong>CircaThread v1 (Topping et al., 2026)</strong> with a URL to the hosted file or GitHub repository (https://github.com/Big-A1/CircAThread).</p>
       </div>
     </div>
   </div>
