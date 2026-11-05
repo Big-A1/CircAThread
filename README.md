@@ -1,8 +1,10 @@
 # CircAThread — Circadian Biology Analysis Suite
 
-[![Open in Browser](https://img.shields.io/badge/Open%20CircAThread-Live-blue)]((https://big-a1.github.io/CircAThread/))
+[![Open in Browser](https://img.shields.io/badge/Open%20CircAThread-Live-blue)](https://big-a1.github.io/CircAThread/)
+ 
+**[→ Open CircAThread in your browser](https://big-a1.github.io/CircAThread/)** · or download `CircAThread.html` and open it locally.
+ 
 
-**[→ Open CircAThread in your browser]([https://alistairtopping.github.io/CircaThread/CircAThread.html](https://big-a1.github.io/CircAThread/))** · or download the `.html` file and open it locally.  
 ---
 
 ## Table of Contents
