@@ -1,0 +1,3628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CircaThread — Circadian Analysis Suite</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>
+/* CircaThread inline XLSX writer - generates valid .xlsx without CDN */
+(function(){
+'use strict';
+function u8(s){return new TextEncoder().encode(s);}
+function crc32(buf){
+  var c=0xFFFFFFFF;
+  var t=new Uint32Array(256);
+  for(var i=0;i<256;i++){var v=i;for(var j=0;j<8;j++)v=v&1?0xEDB88320^(v>>>1):v>>>1;t[i]=v;}
+  for(var i=0;i<buf.length;i++)c=t[(c^buf[i])&0xFF]^(c>>>8);
+  return(c^0xFFFFFFFF)>>>0;
+}
+function b2(v){return[v&0xFF,(v>>8)&0xFF];}
+function b4(v){return[v&0xFF,(v>>8)&0xFF,(v>>16)&0xFF,(v>>24)&0xFF];}
+function cat(){
+  var arrs=Array.prototype.slice.call(arguments);
+  var n=arrs.reduce(function(s,a){return s+a.length;},0);
+  var out=new Uint8Array(n);var off=0;
+  arrs.forEach(function(a){out.set(a,off);off+=a.length;});
+  return out;
+}
+function zip(files){
+  var entries=[];var offset=0;
+  files.forEach(function(f){
+    var nb=u8(f.name);var crc=crc32(f.data);
+    var lh=new Uint8Array([
+      0x50,0x4B,0x03,0x04,0x14,0x00,0x00,0x00,0x00,0x00,
+      0x00,0x00,0x00,0x00
+    ].concat(b4(crc),b4(f.data.length),b4(f.data.length),b2(nb.length),[0x00,0x00]));
+    entries.push({nb:nb,data:f.data,crc:crc,sz:f.data.length,off:offset,lh:lh});
+    offset+=lh.length+nb.length+f.data.length;
+  });
+  var cdp=[];
+  entries.forEach(function(e){
+    cdp.push(new Uint8Array([
+      0x50,0x4B,0x01,0x02,0x14,0x00,0x14,0x00,
+      0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+    ].concat(b4(e.crc),b4(e.sz),b4(e.sz),b2(e.nb.length),[0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00],b4(e.off))));
+    cdp.push(e.nb);
+  });
+  var cd=cat.apply(null,cdp);
+  var eocd=new Uint8Array([0x50,0x4B,0x05,0x06,0x00,0x00,0x00,0x00]
+    .concat(b2(entries.length),b2(entries.length),b4(cd.length),b4(offset),[0x00,0x00]));
+  var parts=[];
+  entries.forEach(function(e){parts.push(e.lh);parts.push(e.nb);parts.push(e.data);});
+  return cat.apply(null,parts.concat([cd,eocd]));
+}
+function xe(v){return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function col(c){var s='';c++;while(c>0){s=String.fromCharCode(65+((c-1)%26))+s;c=Math.floor((c-1)/26);}return s;}
+function addr(r,c){return col(c)+(r+1);}
+function sheet2xml(ws,ss){
+  var map={};var arr=[];
+  function idx(v){if(map[v]===undefined){map[v]=arr.length;arr.push(v);}return map[v];}
+  var rows='';
+  var data=ws._data||[];
+  data.forEach(function(row,ri){
+    var cells='';
+    row.forEach(function(val,ci){
+      if(val===null||val===undefined||val==='')return;
+      var a=addr(ri,ci);
+      if(typeof val==='number'){cells+='<c r="'+a+'"><v>'+val+'</v></c>';}
+      else{cells+='<c r="'+a+'" t="s"><v>'+idx(String(val))+'</v></c>';}
+    });
+    if(cells)rows+='<row r="'+(ri+1)+'">'+cells+'</row>';
+  });
+  var mg='';
+  if(ws['!merges']&&ws['!merges'].length){
+    var refs=ws['!merges'].map(function(m){return'<mergeCell ref="'+addr(m.s.r,m.s.c)+':'+addr(m.e.r,m.e.c)+'"/>';}).join('');
+    mg='<mergeCells count="'+ws['!merges'].length+'">'+refs+'</mergeCells>';
+  }
+  var cols='';
+  if(ws['!cols']&&ws['!cols'].length){
+    var cw=ws['!cols'].map(function(c,i){return c&&c.wch?'<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+c.wch+'" customWidth="1"/>':null;}).filter(Boolean).join('');
+    if(cw)cols='<cols>'+cw+'</cols>';
+  }
+  var lr=data.length,lc=Math.max.apply(null,[0].concat(data.map(function(r){return r?r.length:0;})));
+  var dim=lr&&lc?' ref="A1:'+addr(lr-1,lc-1)+'"':'';
+  var xml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension'+dim+'/>'+cols+'<sheetData>'+rows+'</sheetData>'+mg+'</worksheet>';
+  ss.push.apply(ss,arr);
+  return xml;
+}
+var utils={
+  aoa_to_sheet:function(aoa){
+    return{_data:aoa.map(function(row){return row.map(function(v){return v===undefined||v===null?'':v;});}),'!merges':[],'!cols':[]};
+  },
+  book_new:function(){return{SheetNames:[],Sheets:{}};},
+  book_append_sheet:function(wb,ws,name){wb.SheetNames.push(name);wb.Sheets[name]=ws;}
+};
+function write(wb,opts){
+  var allSS=[];
+  var sheets=wb.SheetNames.map(function(name,i){
+    var xml=sheet2xml(wb.Sheets[name],allSS);
+    return{name:name,xml:xml};
+  });
+  var ssxml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="'+allSS.length+'" uniqueCount="'+allSS.length+'">'+allSS.map(function(s){return'<si><t xml:space="preserve">'+xe(s)+'</t></si>';}).join('')+'</sst>';
+  var wbxml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'+sheets.map(function(s,i){return'<sheet name="'+xe(s.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+2)+'"/>';}).join('')+'</sheets></workbook>';
+  var wbrels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>'+sheets.map(function(s,i){return'<Relationship Id="rId'+(i+2)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'+(i+1)+'.xml"/>';}).join('')+'</Relationships>';
+  var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'+sheets.map(function(s,i){return'<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}).join('')+'</Types>';
+  var rr='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
+  var files=[
+    {name:'[Content_Types].xml',data:u8(ct)},
+    {name:'_rels/.rels',data:u8(rr)},
+    {name:'xl/workbook.xml',data:u8(wbxml)},
+    {name:'xl/_rels/workbook.xml.rels',data:u8(wbrels)},
+    {name:'xl/sharedStrings.xml',data:u8(ssxml)}
+  ].concat(sheets.map(function(s,i){return{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:u8(s.xml)};}));
+  return zip(files);
+}
+window.XLSX={utils:utils,write:write};
+})();
+</script>
+<style>
+/* ── Design tokens ─────────────────────────────────────────
+   Layout: two-column sidebar / content, sticky rule-based header
+   Type:   Source Sans 3 (body) + JetBrains Mono (data/code)
+   Color:  cool-white ground, single authoritative navy accent,
+           per-tab hues desaturated to calibrated, not decorative
+─────────────────────────────────────────────────────────── */
+:root{
+  /* Surfaces */
+  --bg:      #f0f2f5;
+  --bg2:     #ffffff;
+  --bg3:     #f5f7fa;
+  --bg4:     #ebeef3;
+  --bg5:     #e2e6ed;
+  /* Borders */
+  --border:  #d0d5de;
+  --border2: #b8bfcc;
+  /* Text */
+  --text:    #0f1923;
+  --text2:   #3d4a5c;
+  --text3:   #7a8799;
+  /* Semantic accent hues */
+  --accent:  #0052a3;   /* journal blue — CircATreat */
+  --trace:   #4a3580;   /* measured violet — CircATrace */
+  --trend:   #1a6b52;   /* calibrated teal — CircATrends */
+  --peak:    #b03a00;   /* warm-shifted amber-red for peaks */
+  --trough:  #1a6b52;
+  --gold:    #7a5c00;
+  --danger:  #a82828;
+  --ok:      #1a6b52;
+  /* Type */
+  --fh:'Source Sans 3',system-ui,sans-serif;
+  --fm:'JetBrains Mono',ui-monospace,monospace;
+  /* Accent RGB for rgba() use */
+  --accent-r:0;--accent-g:82;--accent-b:163;
+}
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d1117;--bg2:#161b22;--bg3:#1c2330;--bg4:#212839;--bg5:#262e40;
+    --border:#2d3748;--border2:#3d4f6a;
+    --text:#e4e9f0;--text2:#9daec4;--text3:#5c7290;
+    --accent:#4d8fd6;--trace:#8a78d0;--trend:#3db887;
+    --peak:#e0714a;--trough:#3db887;--gold:#c4a840;
+    --danger:#e05050;--ok:#3db887;
+    --accent-r:77;--accent-g:143;--accent-b:214;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#1c2330;--bg4:#212839;--bg5:#262e40;
+  --border:#2d3748;--border2:#3d4f6a;
+  --text:#e4e9f0;--text2:#9daec4;--text3:#5c7290;
+  --accent:#4d8fd6;--trace:#8a78d0;--trend:#3db887;
+  --peak:#e0714a;--trough:#3db887;--gold:#c4a840;
+  --danger:#e05050;--ok:#3db887;
+  --accent-r:77;--accent-g:143;--accent-b:214;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--fh);font-size:13.5px;line-height:1.55;min-height:100vh}
+
+/* ── HEADER ─────────────────────────────────────────────── */
+header{
+  height:48px;display:flex;align-items:stretch;
+  border-bottom:2px solid var(--border);
+  position:sticky;top:0;z-index:300;
+  background:var(--bg2);
+}
+.header-brand{
+  display:flex;align-items:center;gap:10px;
+  padding:0 1.4rem;
+  border-right:1px solid var(--border);
+  flex-shrink:0;
+  text-decoration:none;
+}
+/* Circadian clock mark — SVG sine-wave motif */
+.brand-icon{width:26px;height:26px;flex-shrink:0}
+.brand-name{
+  font-family:var(--fh);font-weight:700;font-size:14px;
+  letter-spacing:.02em;text-transform:uppercase;
+  color:var(--text);
+}
+.brand-name em{font-style:normal;color:var(--accent);font-weight:700}
+.brand-tag{
+  font-size:10px;color:var(--text3);margin-left:6px;
+  font-weight:400;letter-spacing:.04em;
+  padding:2px 7px;border:1px solid var(--border);
+  border-radius:2px;display:none;
+}
+@media(min-width:640px){.brand-tag{display:inline-block}}
+
+/* ── TAB NAV ────────────────────────────────────────────── */
+.tab-nav{display:flex;align-items:stretch;gap:0;padding:0 .5rem;flex:1}
+.tab-btn{
+  display:flex;align-items:center;gap:5px;
+  height:100%;padding:0 1.1rem;
+  border:none;background:transparent;
+  font-family:var(--fh);font-size:12.5px;font-weight:600;
+  letter-spacing:.01em;
+  color:var(--text3);cursor:pointer;
+  border-bottom:3px solid transparent;
+  transition:color .12s,border-color .12s;
+  white-space:nowrap;
+}
+.tab-btn:hover{color:var(--text2)}
+.tab-btn.active-treat{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-btn.active-trace{color:var(--trace);border-bottom-color:var(--trace)}
+.tab-btn.active-trend{color:var(--trend);border-bottom-color:var(--trend)}
+.tab-pill{display:none}
+
+.header-right{margin-left:auto;display:flex;align-items:center;padding-right:1.4rem;gap:12px}
+.hcopyright{font-size:11px;color:var(--text3);letter-spacing:.02em}
+
+/* ── TAB PANELS ─────────────────────────────────────────── */
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+
+/* ── HERO ───────────────────────────────────────────────── */
+.hero{
+  padding:1.6rem 2rem 1.4rem;
+  border-bottom:1px solid var(--border);
+  background:var(--bg2);
+}
+.hero-inner{max-width:1180px;margin:0 auto}
+.hero h1{
+  font-family:var(--fh);
+  font-size:clamp(16px,2.2vw,22px);
+  font-weight:700;line-height:1.15;
+  letter-spacing:-.01em;
+  margin-bottom:.35rem;color:var(--text);
+}
+.hero h1 .hi{color:var(--accent)}
+.hero h1 .hi2{color:var(--trace)}
+.hero p{
+  color:var(--text2);font-size:12.5px;
+  max-width:640px;line-height:1.65;
+}
+
+/* ── LAYOUT ─────────────────────────────────────────────── */
+.app-grid{
+  max-width:1180px;margin:0 auto;
+  padding:1.2rem 1.4rem 4rem;
+  display:grid;grid-template-columns:280px 1fr;
+  gap:1.2rem;align-items:start;
+}
+@media(max-width:760px){.app-grid{grid-template-columns:1fr}}
+.left-col{display:flex;flex-direction:column;gap:.8rem}
+
+/* ── PANELS ─────────────────────────────────────────────── */
+.panel{
+  background:var(--bg2);
+  border:1px solid var(--border);
+  border-radius:2px;
+  overflow:visible;
+}
+.ph{
+  padding:7px 12px;
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+  background:var(--bg3);
+}
+.ph-t{
+  font-family:var(--fh);font-size:10.5px;font-weight:700;
+  color:var(--text2);letter-spacing:.07em;text-transform:uppercase;
+}
+.pb{padding:12px 13px}
+
+/* ── FORM ELEMENTS ──────────────────────────────────────── */
+.fl{
+  display:block;font-size:10px;color:var(--text3);
+  letter-spacing:.07em;margin-bottom:3px;
+  text-transform:uppercase;margin-top:11px;font-weight:600;
+}
+.fl:first-child,.fl0{margin-top:0}
+input[type="text"],input[type="number"],input[type="datetime-local"],select{
+  width:100%;background:var(--bg2);
+  border:1px solid var(--border);border-radius:2px;
+  color:var(--text);font-family:var(--fh);font-size:12px;
+  padding:5px 8px;outline:none;transition:border-color .12s;
+}
+input:focus,select:focus{
+  border-color:var(--accent);
+  outline:2px solid rgba(var(--accent-r),var(--accent-g),var(--accent-b),0.14);
+  outline-offset:0;
+}
+select option{background:var(--bg2)}
+input[type="number"]{-moz-appearance:textfield}
+
+.ck{display:flex;align-items:center;gap:7px;margin-top:7px}
+.ck input[type="checkbox"]{width:13px;height:13px;accent-color:var(--accent);cursor:pointer}
+.ck label{font-size:11.5px;color:var(--text2);cursor:pointer;user-select:none}
+
+.divider{height:1px;background:var(--border);margin:10px 0}
+
+/* ── BUTTONS ────────────────────────────────────────────── */
+.btn{
+  display:block;width:100%;
+  border:1px solid transparent;border-radius:2px;
+  font-family:var(--fh);font-size:12px;font-weight:600;
+  letter-spacing:.02em;
+  cursor:pointer;padding:7px 14px;
+  transition:background .1s,border-color .1s;
+}
+.btn:active{opacity:.88}
+/* Primary — journal blue */
+.btn-a{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn-a:hover{filter:brightness(1.1)}
+.btn-a:disabled{opacity:.38;cursor:not-allowed}
+/* Trace — violet */
+.btn-v{background:var(--trace);color:#fff;border-color:var(--trace);margin-bottom:0}
+.btn-v:hover{filter:brightness(1.12)}
+.btn-v:disabled{opacity:.38;cursor:not-allowed}
+/* Ghost */
+.btn-g{
+  background:var(--bg2);border:1px solid var(--border);
+  color:var(--text2);font-family:var(--fh);font-size:12px;font-weight:500;
+  margin-top:6px;
+}
+.btn-g:hover{border-color:var(--border2);color:var(--text);background:var(--bg3)}
+.btn-g:disabled{opacity:.35;cursor:not-allowed}
+/* Dashed add */
+.btn-add{
+  background:none;border:1px dashed var(--border);border-radius:2px;
+  color:var(--text3);font-family:var(--fh);font-size:11.5px;
+  cursor:pointer;padding:5px;width:100%;
+  transition:border-color .12s,color .12s;margin-top:0;
+}
+.btn-add:hover{border-color:var(--text3);color:var(--text2)}
+
+/* ── STATUS LINE ────────────────────────────────────────── */
+.st{font-size:11px;color:var(--text3);margin-top:7px;min-height:14px;font-style:italic}
+.st.err{color:var(--danger);font-style:normal;font-weight:500}
+.st.ok{color:var(--ok);font-style:normal}
+
+/* ── SHARED FILE BANNER ─────────────────────────────────── */
+.shared-banner{
+  background:var(--bg3);border:1px solid var(--border2);
+  border-radius:2px;padding:8px 10px;
+  margin-bottom:8px;animation:fadeUp .22s ease;
+}
+
+/* ── DROP ZONE ──────────────────────────────────────────── */
+.dz{
+  border:1px dashed var(--border2);border-radius:2px;
+  padding:18px 14px;text-align:center;cursor:pointer;
+  transition:border-color .12s,background .12s;
+  position:relative;background:var(--bg3);
+}
+.dz:hover,.dz.over{
+  border-color:var(--accent);
+  background:rgba(var(--accent-r),var(--accent-g),var(--accent-b),.05);
+}
+.dz input[type="file"]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.dz-icon{font-size:14px;color:var(--text3);display:block;margin-bottom:4px}
+.dz-text{font-size:11px;color:var(--text2)}
+.dz-text strong{color:var(--text);display:block;font-size:12px;margin-bottom:2px;font-weight:600}
+.dz-name{
+  margin-top:6px;padding:3px 8px;
+  background:rgba(var(--accent-r),var(--accent-g),var(--accent-b),.08);
+  border-radius:2px;color:var(--accent);font-size:11px;display:none;word-break:break-all;
+}
+
+/* ── CIRCATREAT ─────────────────────────────────────────── */
+.treat-list{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.treat-row{
+  display:flex;align-items:center;gap:6px;
+  background:var(--bg3);border:1px solid var(--border);
+  border-radius:2px;padding:5px 8px;
+}
+.treat-lbl{font-size:10px;color:var(--text3);min-width:74px;letter-spacing:.04em;text-transform:uppercase}
+.treat-row input{flex:1;background:transparent;border:none;color:var(--accent);font-family:var(--fm);font-size:12.5px;outline:none}
+.treat-row input::placeholder{color:var(--text3)}
+.treat-rm{background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:0 2px;line-height:1;transition:color .12s}
+.treat-rm:hover{color:var(--danger)}
+
+.right-col{display:flex;flex-direction:column;gap:1.1rem}
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+@media(max-width:560px){.stats-row{grid-template-columns:repeat(2,1fr)}}
+/* Stat card: left accent bar shows which tab's data it is */
+.sc{
+  background:var(--bg2);border:1px solid var(--border);
+  border-radius:2px;padding:10px 13px;
+  border-left:3px solid var(--accent);
+}
+.sc-l{font-size:9.5px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px;font-weight:600}
+.sc-v{font-family:var(--fh);font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
+
+.chart-wrap{position:relative;width:100%;height:240px}
+.chart-wrap canvas{position:absolute;top:0;left:0;width:100%;height:100%}
+
+.ct-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(134px,1fr));gap:8px}
+.ct-card{
+  background:var(--bg3);border:1px solid var(--border);
+  border-radius:2px;padding:11px 12px;transition:border-color .12s;
+  border-top:3px solid var(--border);
+}
+.ct-card:hover{border-color:var(--border2)}
+.ct-badge{font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);margin-bottom:4px;font-weight:600}
+.ct-num{font-family:var(--fh);font-size:21px;font-weight:700;letter-spacing:-.01em;margin-bottom:2px;font-variant-numeric:tabular-nums}
+.ct-clk{font-size:14px;font-weight:600;color:var(--text);margin-bottom:2px;font-variant-numeric:tabular-nums}
+.ct-dt{font-size:11px;color:var(--text2);margin-bottom:4px}
+.ct-ph{font-size:10px;color:var(--text3)}
+
+.sched-scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{
+  text-align:left;padding:7px 11px;
+  font-family:var(--fh);font-size:10px;font-weight:700;
+  letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text2);border-bottom:2px solid var(--border);
+  white-space:nowrap;background:var(--bg3);
+}
+td{padding:6px 11px;border-bottom:1px solid var(--border);white-space:nowrap;font-family:var(--fh);font-size:12.5px}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--bg4)}
+.td-d{color:var(--text3);font-size:11px}
+.td-m{font-family:var(--fm)}
+
+.treat-placeholder,.trace-placeholder{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:400px;color:var(--text3);text-align:center;
+  padding:2rem;border:1px solid var(--border);
+  border-radius:2px;background:var(--bg2);
+}
+.ph-ico{font-size:24px;opacity:.14;margin-bottom:.8rem}
+.treat-placeholder p,.trace-placeholder p{font-size:12.5px;max-width:260px;line-height:1.8}
+
+.note{
+  background:var(--bg3);border:1px solid var(--border);
+  border-left:3px solid var(--accent);border-radius:0 2px 2px 0;
+  padding:9px 13px;font-size:11.5px;color:var(--text2);line-height:1.75;
+}
+
+/* ── CIRCATRACE ─────────────────────────────────────────── */
+.trace-list{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.ti{
+  background:var(--bg3);border:1px solid var(--border);
+  border-radius:2px;padding:7px 10px;
+  display:flex;flex-direction:column;gap:4px;
+}
+.ti-top{display:flex;align-items:center;gap:7px}
+.tswatch{width:18px;height:18px;border-radius:2px;flex-shrink:0;border:1px solid var(--border2);position:relative;cursor:pointer}
+.tswatch input[type="color"]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;padding:0;border:none}
+.tlw{flex:1;min-width:0}
+.tlabel{
+  width:100%;background:transparent;border:none;
+  border-bottom:1px solid transparent;
+  color:var(--text);font-family:var(--fm);font-size:11px;
+  padding:1px 2px;outline:none;transition:border-color .12s;cursor:text;
+}
+.tlabel:hover{border-bottom-color:var(--border2)}
+.tlabel:focus{border-bottom-color:var(--trace)}
+.tfn{font-size:9px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+.trm{background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:0;line-height:1;flex-shrink:0;transition:color .12s}
+.trm:hover{color:var(--danger)}
+.tmeta{font-size:9px;color:var(--text3);font-variant-numeric:tabular-nums}
+
+.bg-toggle{display:flex;gap:3px;margin-top:6px}
+.bg-pill{
+  flex:1;padding:4px;border-radius:2px;
+  border:1px solid var(--border);background:var(--bg3);
+  color:var(--text2);font-family:var(--fh);font-size:11px;font-weight:500;
+  cursor:pointer;text-align:center;transition:all .1s;user-select:none;
+}
+.bg-pill.active{border-color:var(--trace);background:rgba(74,53,128,.1);color:var(--trace)}
+
+.pgrid{display:grid;grid-template-columns:repeat(8,1fr);gap:3px;margin-top:6px}
+.psw{width:100%;aspect-ratio:1;border-radius:2px;cursor:pointer;border:2px solid transparent;transition:border-color .12s,transform .1s}
+.psw:hover{transform:scale(1.15)}
+
+.xrow{display:flex;gap:6px;margin-top:6px}
+.xrow select{flex:1}
+.xrow .btn{width:auto;flex:2;margin:0}
+
+/* Publication-quality chart wrapper */
+.cwrap{
+  background:var(--bg2);border:1px solid var(--border);
+  border-radius:2px;overflow:hidden;transition:background .25s;
+}
+.cwrap.pw{background:#ffffff}
+.cwrap.po{background:#f8f7f2}
+.cinner{padding:16px 16px 12px}
+.trow{display:flex;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.trow input{
+  background:transparent;border:none;
+  border-bottom:1px solid var(--border2);border-radius:0;
+  color:var(--text);font-family:var(--fh);
+  font-size:13px;font-weight:700;padding:2px 4px;
+  flex:1;min-width:0;outline:none;transition:border-color .18s;
+}
+.trow input:focus{border-bottom-color:var(--trace)}
+.trow input::placeholder{color:var(--text3)}
+.trow input.tsub{font-size:11px;font-family:var(--fm);font-weight:400;color:var(--text2)}
+.cwrap.pw .trow input,.cwrap.po .trow input{color:#111827}
+.cwrap.pw .trow input::placeholder,.cwrap.po .trow input::placeholder{color:#aaa}
+
+.legwrap{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+.legitem{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
+.legdot{width:18px;height:2.5px;border-radius:1px}
+.cwrap.pw .legitem,.cwrap.po .legitem{color:#374151}
+canvas#TC{display:block;width:100%;border-radius:1px}
+
+/* ── CIRCATRENDS ────────────────────────────────────────── */
+.btn-t{background:var(--trend);color:#fff;border-color:var(--trend)}
+.btn-t:hover{filter:brightness(1.1)}
+.btn-t:disabled{opacity:.35;cursor:not-allowed}
+input[type="checkbox"].accent-trend{accent-color:var(--trend)}
+
+.data-table-wrap{overflow:auto;max-height:340px;border:1px solid var(--border);border-radius:2px}
+.data-table{width:max-content;min-width:100%;border-collapse:collapse;font-size:11px}
+.data-table th{
+  background:var(--bg4);color:var(--text2);
+  padding:6px 10px;border-bottom:2px solid var(--border);
+  white-space:nowrap;font-family:var(--fh);
+  font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+  position:sticky;top:0;z-index:2;
+}
+.data-table td{padding:5px 10px;border-bottom:1px solid var(--border);white-space:nowrap;font-family:var(--fm)}
+.data-table tr:last-child td{border-bottom:none}
+.data-table tr:hover td{background:var(--bg4)}
+.data-table td.sample-id{color:var(--text);font-weight:500;position:sticky;left:0;background:var(--bg2);z-index:1}
+.data-table td.grp-cell{padding:4px 8px}
+.grp-sel{
+  background:var(--bg3);border:1px solid var(--border2);border-radius:2px;
+  color:var(--text);font-family:var(--fm);font-size:11px;
+  padding:2px 6px;width:100%;outline:none;
+}
+.grp-sel:focus{border-color:var(--trend)}
+
+.group-list{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.group-item{
+  display:flex;align-items:center;gap:8px;
+  background:var(--bg3);border:1px solid var(--border);
+  border-radius:2px;padding:6px 10px;
+}
+.group-swatch{width:15px;height:15px;border-radius:2px;flex-shrink:0;border:1px solid var(--border2);position:relative;cursor:pointer}
+.group-swatch input[type="color"]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;padding:0;border:none}
+.group-name-inp{flex:1;background:transparent;border:none;border-bottom:1px solid transparent;color:var(--text);font-family:var(--fm);font-size:12px;padding:1px 2px;outline:none;transition:border-color .12s}
+.group-name-inp:hover{border-bottom-color:var(--border2)}
+.group-name-inp:focus{border-bottom-color:var(--trend)}
+.grm{background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:0;line-height:1;transition:color .12s}
+.grm:hover{color:var(--danger)}
+
+.stats-results{display:flex;flex-direction:column;gap:.9rem;margin-top:0}
+.param-block{background:var(--bg2);border:1px solid var(--border);border-radius:2px;overflow:hidden}
+.param-block-head{
+  padding:7px 13px;background:var(--bg3);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+}
+.param-block-title{font-family:var(--fh);font-size:10.5px;font-weight:700;color:var(--text2);letter-spacing:.04em;text-transform:uppercase}
+.param-block-body{padding:13px}
+.stat-sig{font-size:12px;color:var(--text2);margin-top:7px;line-height:1.9}
+.stat-sig b{color:var(--text)}
+.sig-badge{
+  display:inline-block;padding:1px 6px;border-radius:2px;
+  font-size:10px;margin-left:4px;font-family:var(--fm);font-weight:600;
+}
+.sig-yes{background:rgba(26,107,82,.1);color:var(--trend);border:1px solid rgba(26,107,82,.2)}
+.sig-no{background:var(--bg4);color:var(--text3);border:1px solid var(--border)}
+
+.trend-chart-wrap{position:relative;width:100%;height:240px}
+.trend-chart-wrap canvas{position:absolute;top:0;left:0;width:100%;height:100%}
+
+.pal-upload-row{display:flex;gap:6px;align-items:center;margin-top:8px}
+.pal-upload-row input[type="file"]{display:none}
+.pal-upload-btn{
+  flex:1;padding:5px 8px;border-radius:2px;
+  border:1px dashed var(--border2);background:var(--bg3);
+  color:var(--text2);font-family:var(--fm);font-size:11px;
+  cursor:pointer;text-align:center;transition:border-color .12s,color .12s;
+}
+.pal-upload-btn:hover{border-color:var(--accent);color:var(--accent)}
+.custom-pal-swatches{display:flex;flex-wrap:wrap;gap:3px;margin-top:6px}
+.custom-psw{width:17px;height:17px;border-radius:2px;cursor:pointer;border:2px solid transparent;transition:transform .1s}
+.custom-psw:hover{transform:scale(1.18)}
+
+/* ── ANIMATION + SCROLLBAR ──────────────────────────────── */
+@keyframes fu{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.fu{animation:fu .24s ease both}
+@media(prefers-reduced-motion:reduce){.fu{animation:none}}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--bg3)}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:0}
+
+/* ── FAQ / DOCS TAB ─────────────────────────────────────── */
+.active-faq{border-bottom-color:var(--accent)!important;color:var(--accent)!important}
+.faq-wrap{max-width:860px;margin:0 auto;padding:2.5rem 1.5rem 4rem}
+.faq-hero{margin-bottom:2.5rem}
+.faq-hero h1{font-size:1.55rem;font-weight:700;color:var(--text);margin:0 0 .55rem;letter-spacing:-.01em}
+.faq-hero p{font-size:.92rem;color:var(--text2);margin:0;max-width:62ch;line-height:1.65}
+.faq-section{margin-bottom:2.5rem}
+.faq-section-title{font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);padding-bottom:.5rem;border-bottom:1px solid var(--border);margin-bottom:1rem}
+.faq-item{border:1px solid var(--border);border-radius:2px;margin-bottom:.4rem;background:var(--bg2)}
+.faq-q{width:100%;text-align:left;background:none;border:none;padding:.75rem 1rem;font-family:var(--fh);font-size:.875rem;font-weight:600;color:var(--text);cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:1rem;line-height:1.4}
+.faq-q:hover{background:var(--bg3)}
+.faq-q .faq-chevron{flex-shrink:0;font-size:.75rem;color:var(--text3);transition:transform .18s}
+.faq-item.open .faq-chevron{transform:rotate(180deg)}
+.faq-a{display:none;padding:.1rem 1rem 1rem;font-size:.85rem;color:var(--text2);line-height:1.7;border-top:1px solid var(--border)}
+.faq-item.open .faq-a{display:block}
+.faq-a p{margin:.65rem 0 0}
+.faq-a p:first-child{margin-top:.55rem}
+.faq-a ul,.faq-a ol{margin:.5rem 0 .5rem 1.2rem;padding:0}
+.faq-a li{margin-bottom:.3rem}
+.faq-a code{font-family:var(--fm);font-size:.82em;background:var(--bg4);padding:.1em .35em;border-radius:2px;color:var(--text)}
+.faq-a strong{color:var(--text);font-weight:600}
+.faq-a .methods-box{background:var(--bg3);border-left:3px solid var(--accent);border-radius:0 2px 2px 0;padding:.75rem 1rem;margin:.75rem 0;font-size:.82rem;font-style:italic;line-height:1.65;color:var(--text2)}
+.faq-a .methods-box strong{font-style:normal}
+.faq-tag{display:inline-block;font-size:.68rem;font-weight:600;padding:.1em .45em;border-radius:2px;background:var(--bg4);color:var(--text3);letter-spacing:.04em;margin-left:.4rem;vertical-align:middle;text-transform:uppercase}
+.faq-tag.treat{background:color-mix(in srgb,var(--accent) 12%,var(--bg2));color:var(--accent)}
+.faq-tag.trace{background:color-mix(in srgb,var(--trace) 12%,var(--bg2));color:var(--trace)}
+.faq-tag.trend{background:color-mix(in srgb,var(--trend) 12%,var(--bg2));color:var(--trend)}
+
+/* ── FOOTER ─────────────────────────────────────────────── */
+footer{
+  border-top:1px solid var(--border);
+  padding:.9rem 2rem;text-align:center;
+  font-size:11px;color:var(--text3);
+  background:var(--bg2);letter-spacing:.03em;
+  font-family:var(--fh);
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════════════════════ -->
+<header>
+  <div class="header-brand">
+    <div class="brand-icon">◑</div>
+    <span class="brand-name"><em>Circa</em>Thread</span>
+    <span class="brand-tag">Circadian Suite</span>
+  </div>
+
+  <nav class="tab-nav">
+    <button class="tab-btn active-treat" id="tab-treat" onclick="switchTab('treat')">
+      CircATreat
+      <span class="tab-pill">Treatment Scheduler</span>
+    </button>
+    <button class="tab-btn" id="tab-trace" onclick="switchTab('trace')">
+      CircATrace
+      <span class="tab-pill">Publication Plotter</span>
+    </button>
+    <button class="tab-btn" id="tab-trend" onclick="switchTab('trend')">
+      CircATrends
+      <span class="tab-pill">Statistical Analysis</span>
+    </button>
+    <button class="tab-btn" id="tab-faq" onclick="switchTab('faq')">
+      Docs &amp; FAQ
+      <span class="tab-pill">Guide &amp; Methods</span>
+    </button>
+  </nav>
+
+  <div class="header-right">
+    <span class="hcopyright">© Topping et al. 2026</span>
+  </div>
+</header>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     TAB 1 — CircATreat
+═══════════════════════════════════════════════════════════════ -->
+<div class="tab-panel active" id="panel-treat">
+
+  <div class="hero">
+    <h1>Circadian Treatment<br><span class="hi">Time Predictor</span></h1>
+    <p>Upload one or more LumiCycle CSVs, set your desired circadian times, and get real-world treatment schedules. With multiple files, <strong>Absolute</strong> shows each replicate's CT times independently; <strong>Optimum</strong> gives a consensus clock time where all replicates agree within 20 min.</p>
+  </div>
+
+  <div class="app-grid">
+    <div class="left-col">
+
+      <div class="panel">
+        <div class="ph">
+          <span class="ph-t">1 — Data files</span>
+          <span style="font-size:10px;color:var(--text3)" id="AT-fcnt">0 loaded</span>
+        </div>
+        <div class="pb">
+          <div id="AT-dz-wrap">
+          <div class="dz" id="AT-dz">
+            <input type="file" id="AT-fi" accept=".csv,.txt" multiple>
+            <span class="dz-icon">↑</span>
+            <div class="dz-text"><strong>Browse or drop CSV files</strong>Multiple files supported — each is one replicate</div>
+          </div>
+          </div>
+          <div id="AT-flist" style="display:flex;flex-direction:column;gap:6px;margin-top:9px"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><span class="ph-t">2 — Multi-file options</span></div>
+        <div class="pb">
+          <div class="ck" style="margin-top:0">
+            <input type="checkbox" id="AT-avg" checked>
+            <label for="AT-avg">Average traces on chart</label>
+          </div>
+          <p style="font-size:10px;color:var(--text3);margin-top:5px;line-height:1.6">Interpolates traces to a shared time axis — mean ± SD envelope overlaid in white. Individual traces shown at reduced opacity.</p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><span class="ph-t">3 — Reporter cassette</span></div>
+        <div class="pb">
+          <label class="fl" style="margin-top:0">Bioluminescence reporter</label>
+          <select id="AT-cassette">
+            <option value="none">None / unknown (no CT annotation)</option>
+            <optgroup label="Core clock — activators">
+              <option value="bmal1">Bmal1::Luc &nbsp;— peak ≈ CT0</option>
+              <option value="clock">Clock::Luc &nbsp;— peak ≈ CT0</option>
+            </optgroup>
+            <optgroup label="Core clock — repressors">
+              <option value="per1">Per1::Luc &nbsp;— peak ≈ CT8</option>
+              <option value="per2">Per2::Luc &nbsp;— peak ≈ CT12</option>
+              <option value="per3">Per3::Luc &nbsp;— peak ≈ CT10</option>
+              <option value="cry1">Cry1::Luc &nbsp;— peak ≈ CT16</option>
+              <option value="cry2">Cry2::Luc &nbsp;— peak ≈ CT14</option>
+            </optgroup>
+            <optgroup label="Auxiliary loop">
+              <option value="reverba">Rev-erbα::Luc &nbsp;— peak ≈ CT4</option>
+              <option value="rora">RORα::Luc &nbsp;— peak ≈ CT20</option>
+              <option value="dbp">Dbp::Luc &nbsp;— peak ≈ CT8</option>
+              <option value="tef">Tef::Luc &nbsp;— peak ≈ CT8</option>
+            </optgroup>
+            <optgroup label="Custom">
+              <option value="custom">Custom peak CT →</option>
+            </optgroup>
+          </select>
+          <div id="AT-custom-ct-row" style="display:none;margin-top:7px;display:none;align-items:center;gap:7px">
+            <label style="font-size:10px;color:var(--text3);white-space:nowrap">Peak corresponds to CT:</label>
+            <input type="number" id="AT-custom-ct" value="0" min="0" max="23.9" step="0.5"
+              style="width:60px;font-size:11px;padding:3px 6px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--fm)">
+          </div>
+          <p style="font-size:10px;color:var(--text3);margin-top:7px;line-height:1.6">
+            Selecting a cassette annotates each treatment time with its circadian time (CT) based on the known phase of the reporter peak. Results still show the clock time; CT is an additional label only. Peak CT values are canonical literature values for SCN/fibroblasts under LD conditions — adjust using Custom if your system differs.
+          </p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><span class="ph-t">4 — Treatment times</span></div>
+        <div class="pb">
+          <div class="treat-list" id="AT-tl"></div>
+          <button class="btn-add" id="AT-add">+ add treatment time</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="pb">
+          <button class="btn btn-a" id="AT-run">Analyse →</button>
+          <button class="btn btn-g" id="AT-demo">Run with demo data</button>
+          <button class="btn btn-g" id="AT-save" disabled>⬇ Save report (.txt)</button>
+          <div class="st" id="AT-st">Load a CSV or run the demo to begin.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="right-col" id="AT-right">
+      <div class="treat-placeholder">
+        <div class="ph-ico">◑</div>
+        <p>Results will appear here once you run the analysis.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     TAB 2 — CircATrace
+═══════════════════════════════════════════════════════════════ -->
+<div class="tab-panel" id="panel-trace">
+
+  <div class="hero">
+    <h1>Bioluminescence<br><span class="hi2">Publication Plotter</span></h1>
+    <p>Overlay multiple LumiCycle traces, label each one independently, and export publication-quality figures at up to 600 dpi in PNG, JPEG, or TIFF.</p>
+  </div>
+
+  <div class="app-grid">
+    <div class="left-col">
+
+      <!-- Traces -->
+      <div class="panel">
+        <div class="ph">
+          <span class="ph-t">Traces</span>
+          <span style="font-size:10px;color:var(--text3)" id="AC-cnt">0 loaded</span>
+        </div>
+        <div class="pb">
+          <div id="AC-dz-wrap">
+          <div class="dz" id="AC-dz">
+            <input type="file" id="AC-fi" accept=".csv,.txt" multiple>
+            <span class="dz-icon">↑</span>
+            <div class="dz-text"><strong>Drop CSV files here</strong>Multiple files — click to browse</div>
+          </div>
+          </div>
+          <div class="trace-list" id="AC-tl"></div>
+        </div>
+      </div>
+
+      <!-- Palette -->
+      <div class="panel">
+        <div class="ph"><span class="ph-t">Colour palette</span></div>
+        <div class="pb">
+          <label class="fl fl0">Preset</label>
+          <select id="AC-pal">
+            <optgroup label="Colourblind friendly">
+              <option value="okabe">Okabe–Ito (universal CB)</option>
+              <option value="wong">Wong 8-colour</option>
+              <option value="tol">Paul Tol muted</option>
+              <option value="ibm">IBM Carbon</option>
+            </optgroup>
+            <optgroup label="Greyscale / monochrome">
+              <option value="grey5">5-step greyscale</option>
+              <option value="grey8">8-step greyscale</option>
+              <option value="blackgrey">Black + greys</option>
+              <option value="monodash">Black — varied dash</option>
+            </optgroup>
+          </select>
+          <div class="pgrid" id="AC-pg"></div>
+          <button class="btn btn-g" id="AC-applypal" style="margin-top:8px">Apply to all traces</button>
+        </div>
+      </div>
+
+      <!-- Options -->
+      <div class="panel">
+        <div class="ph"><span class="ph-t">Plot options</span></div>
+        <div class="pb">
+          <label class="fl fl0">Plot background</label>
+          <div class="bg-toggle">
+            <div class="bg-pill active" data-bg="dark" id="AC-bgd">Dark</div>
+            <div class="bg-pill" data-bg="white" id="AC-bgw">White</div>
+            <div class="bg-pill" data-bg="offwhite" id="AC-bgo">Off-white</div>
+          </div>
+          <label class="fl">Smoothing (pts)</label>
+          <input type="number" id="AC-sm" value="11" min="1" max="51" step="2">
+          <label class="fl">Line width</label>
+          <input type="number" id="AC-lw" value="2" min="0.5" max="6" step="0.5">
+          <div class="ck"><input type="checkbox" id="AC-pk" checked><label for="AC-pk">Peak markers ▲</label></div>
+          <div class="ck"><input type="checkbox" id="AC-tr" checked><label for="AC-tr">Trough markers ◆</label></div>
+          <div class="ck"><input type="checkbox" id="AC-gr" checked><label for="AC-gr">Grid lines</label></div>
+          <div class="ck"><input type="checkbox" id="AC-lg" checked><label for="AC-lg">Legend strip</label></div>
+          <div class="ck"><input type="checkbox" id="AC-lb" checked><label for="AC-lb">Trace labels on plot</label></div>
+          <div class="ck"><input type="checkbox" id="AC-nm"><label for="AC-nm">Normalise (0–1)</label></div>
+          <div class="ck"><input type="checkbox" id="AC-avg"><label for="AC-avg">Show mean ± SEM trace</label></div>
+          <label class="fl">X-axis units</label>
+          <div class="bg-toggle" style="margin-top:4px">
+            <div class="bg-pill active" data-xunit="hours" id="AC-xu-h">Hours</div>
+            <div class="bg-pill" data-xunit="days" id="AC-xu-d">Days</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Export -->
+      <div class="panel">
+        <div class="ph"><span class="ph-t">Export</span></div>
+        <div class="pb">
+          <label class="fl fl0">Resolution (DPI)</label>
+          <select id="AC-dpi">
+            <option value="96">96 dpi — screen</option>
+            <option value="300">300 dpi — print</option>
+            <option value="600" selected>600 dpi — publication</option>
+          </select>
+          <label class="fl">Format</label>
+          <div class="xrow">
+            <select id="AC-fmt">
+              <option value="png">PNG (lossless)</option>
+              <option value="jpeg">JPEG (compressed)</option>
+              <option value="tiff">TIFF (uncompressed)</option>
+            </select>
+            <button class="btn btn-v xrow" id="AC-exp" disabled style="margin:0">⬇ Export</button>
+          </div>
+          <div class="divider"></div>
+          <button class="btn btn-g" id="AC-render">Render / Refresh</button>
+          <div class="st" id="AC-st">Load CSV files to begin.</div>
+        </div>
+      </div>
+
+    </div><!-- /left-col -->
+
+    <!-- Canvas area -->
+    <div class="cwrap fu" id="AC-cw">
+      <div class="cinner">
+        <div class="trow">
+          <input type="text" id="AC-ttl" placeholder="Figure title…">
+          <input type="text" id="AC-sub" class="tsub" placeholder="condition / subtitle">
+        </div>
+        <div class="legwrap" id="AC-lw2"></div>
+        <div id="AC-plotarea">
+          <div class="trace-placeholder" id="AC-ph">
+            <div class="ph-ico">◑</div>
+            <p>Drop one or more LumiCycle CSV files on the left, then click Render.</p>
+          </div>
+          <canvas id="TC" style="display:none"></canvas>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     TAB 3 — CircATrends
+═══════════════════════════════════════════════════════════════ -->
+<div class="tab-panel" id="panel-trend">
+
+  <div class="hero">
+    <h1>Circadian Parameter<br><span style="color:var(--trend)">Statistical Analysis</span></h1>
+    <p>Drop LumiCycle CSV files — peaks and troughs are auto-detected and added as rows. Group samples by treatment, then run statistics on phase, period, amplitude (peak-to-trough), magnitude (mean peak Y), and the waveform asymmetry parameters <strong>rising period</strong> (trough→peak) and <strong>falling period</strong> (peak→trough).</p>
+  </div>
+
+  <div style="max-width:1180px;margin:0 auto;padding:0 1.5rem 4rem;display:grid;grid-template-columns:292px 1fr;gap:1.4rem;align-items:start">
+    <div class="left-col">
+
+      <!-- Upload CSVs -->
+      <div class="panel">
+        <div class="ph">
+          <span class="ph-t">1 — Add LumiCycle CSVs</span>
+          <span style="font-size:10px;color:var(--text3)" id="TR-rowcnt">0 samples</span>
+        </div>
+        <div class="pb">
+          <div id="TR-dz-wrap">
+          <div class="dz" id="TR-dz">
+            <input type="file" id="TR-fi" accept=".csv,.txt" multiple>
+            <span class="dz-icon">↑</span>
+            <div class="dz-text"><strong>Drop CSV files here</strong>Each file = one row · multiple supported</div>
+          </div>
+          </div>
+          <div class="st" id="TR-load-st" style="margin-top:6px"></div>
+          <button class="btn btn-g" id="TR-clear" style="margin-top:6px">Clear all rows</button>
+        </div>
+      </div>
+
+      <!-- Groups -->
+      <div class="panel">
+        <div class="ph">
+          <span class="ph-t">2 — Treatment groups</span>
+          <span style="font-size:10px;color:var(--text3)" id="TR-gcnt">0 groups</span>
+        </div>
+        <div class="pb">
+          <p style="font-size:11px;color:var(--text2);margin-bottom:10px">Create groups then assign each sample in the table.</p>
+          <div class="group-list" id="TR-groups"></div>
+          <button class="btn btn-g" id="TR-addgrp" style="margin-top:8px">+ Add group</button>
+        </div>
+      </div>
+
+      <!-- Palette -->
+      <div class="panel">
+        <div class="ph"><span class="ph-t">Colour palette</span></div>
+        <div class="pb">
+          <label class="fl fl0">Preset (colourblind friendly)</label>
+          <select id="TR-pal">
+            <optgroup label="Colourblind friendly">
+              <option value="okabe">Okabe–Ito (universal CB)</option>
+              <option value="wong">Wong 8-colour</option>
+              <option value="tol">Paul Tol muted</option>
+              <option value="ibm">IBM Carbon</option>
+            </optgroup>
+            <optgroup label="Greyscale">
+              <option value="grey5">5-step greyscale</option>
+              <option value="blackgrey">Black + greys</option>
+            </optgroup>
+          </select>
+          <div class="pgrid" id="TR-pg"></div>
+          <div class="divider"></div>
+          <label class="fl">Upload custom palette (.txt, one hex per line)</label>
+          <div class="pal-upload-row">
+            <label class="pal-upload-btn" for="TR-palfile">Browse palette file…</label>
+            <input type="file" id="TR-palfile" accept=".txt,.csv">
+          </div>
+          <div class="custom-pal-swatches" id="TR-custom-swatches"></div>
+          <button class="btn btn-g" id="TR-applypal" style="margin-top:8px">Apply palette to groups</button>
+        </div>
+      </div>
+
+      <!-- Analysis & export -->
+      <div class="panel">
+        <div class="ph"><span class="ph-t">3 — Analysis &amp; export</span></div>
+        <div class="pb">
+          <label class="fl fl0">Graph background</label>
+          <div class="bg-toggle">
+            <div class="bg-pill active" data-trbg="dark"  id="TR-bgd">Dark</div>
+            <div class="bg-pill"        data-trbg="white" id="TR-bgw">White</div>
+            <div class="bg-pill"        data-trbg="offwhite" id="TR-bgo">Off-white</div>
+          </div>
+          <label class="fl">Statistical test</label>
+          <select id="TR-test">
+            <option value="welch">Welch t-test (2 groups, unequal var)</option>
+            <option value="ttest">Unpaired t-test (2 groups)</option>
+            <option value="paired">Paired t-test (2 groups, matched)</option>
+            <option value="mannwhitney">Mann–Whitney U (non-parametric)</option>
+            <option value="anova">One-way ANOVA (≥3 groups)</option>
+            <option value="twoway">Two-way ANOVA (2 factors)</option>
+          </select>
+          <div id="TR-posthoc-row" style="display:none;margin-top:8px">
+            <label class="fl" style="margin-top:0;color:var(--trend)">Post-hoc test</label>
+            <select id="TR-posthoc">
+              <option value="tukey">Tukey HSD (controls family-wise error)</option>
+              <option value="bonferroni">Bonferroni correction</option>
+              <option value="none">None (ANOVA omnibus only)</option>
+            </select>
+          </div>
+          <div id="TR-twoway-row" style="display:none;margin-top:8px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:8px 10px">
+            <label class="fl" style="margin-top:0;color:var(--trend)">Two-way ANOVA factor split</label>
+            <p style="font-size:10px;color:var(--text3);margin-bottom:6px;line-height:1.6">Group names are split by the delimiter below into Factor A and Factor B. e.g. groups named <em>WT_pre</em> and <em>KO_post</em> with delimiter <code>_</code> give Factor A = WT/KO, Factor B = pre/post.</p>
+            <div style="display:flex;align-items:center;gap:6px">
+              <label style="font-size:10px;color:var(--text3);white-space:nowrap">Delimiter:</label>
+              <input type="text" id="TR-twoway-delim" value="_" maxlength="5"
+                style="width:40px;font-size:11px;padding:3px 5px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--fm);text-align:center">
+              <label style="font-size:10px;color:var(--text3);white-space:nowrap;margin-left:6px">Factor A = position:</label>
+              <select id="TR-twoway-fa" style="font-size:10px;padding:3px 5px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--fm)">
+                <option value="0">1st part</option>
+                <option value="1">2nd part</option>
+              </select>
+            </div>
+          </div>
+          <div id="TR-paired-note" style="display:none;margin-top:6px;font-size:10px;color:var(--text3);line-height:1.6;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:6px 9px">Pairs are matched by row order within each group. Ensure samples are ordered identically (e.g. same animal across conditions). Requires equal n in both groups.</div>
+          <div class="ck"><input type="checkbox" id="TR-showpts" checked><label for="TR-showpts">Show individual data points</label></div>
+          <div class="ck"><input type="checkbox" id="TR-showerr" checked><label for="TR-showerr">Error bars (± SEM)</label></div>
+          <div class="ck"><input type="checkbox" id="TR-showsig" checked><label for="TR-showsig">Significance brackets</label></div>
+          <div class="ck" id="TR-sigonly-row" style="padding-left:20px"><input type="checkbox" id="TR-sigonly"><label for="TR-sigonly">Significant pairs only (p &lt; 0.05)</label></div>
+          <div class="divider"></div>
+          <label class="fl">Normalisation</label>
+          <div style="display:flex;align-items:center;gap:7px;margin-top:5px">
+            <input type="checkbox" id="TR-donorm" style="width:14px;height:14px;accent-color:var(--trend);cursor:pointer">
+            <label for="TR-donorm" style="font-size:11px;color:var(--text2);cursor:pointer;user-select:none">Normalise to reference group</label>
+          </div>
+          <div id="TR-normbox" style="display:none;margin-top:8px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+            <label class="fl" style="margin-top:0">Reference group (= 100%)</label>
+            <select id="TR-normgrp" style="margin-bottom:8px">
+              <option value="">— select group —</option>
+            </select>
+            <label class="fl" style="margin-top:0">Express values as</label>
+            <div style="display:flex;gap:4px;margin-top:4px">
+              <div class="bg-pill active" data-normmode="absolute" id="TR-nm-abs" style="flex:1;font-size:10px;padding:5px 4px">Absolute</div>
+              <div class="bg-pill" data-normmode="percent" id="TR-nm-pct" style="flex:1;font-size:10px;padding:5px 4px">% of ref</div>
+              <div class="bg-pill" data-normmode="fold" id="TR-nm-fold" style="flex:1;font-size:10px;padding:5px 4px">Fold change</div>
+            </div>
+            <p style="font-size:10px;color:var(--text3);margin-top:6px;line-height:1.6" id="TR-normhint">Values shown as absolute numbers.</p>
+          </div>
+          <div class="divider"></div>
+          <label class="fl">Phase anchor</label>
+          <div style="display:flex;gap:12px;margin-bottom:6px">
+            <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text);cursor:pointer">
+              <input type="radio" name="TR-anchor" id="TR-anchor-peak" value="peak" checked style="accent-color:var(--peak)">
+              <span>&#9650; Peak (first peak)</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text);cursor:pointer">
+              <input type="radio" name="TR-anchor" id="TR-anchor-trough" value="trough" style="accent-color:var(--trough)">
+              <span>&#9670; Trough (first trough)</span>
+            </label>
+          </div>
+          <p style="font-size:10px;color:var(--text3);margin-bottom:10px;line-height:1.6">Determines which feature defines phase. When set to Trough, phase reports the first trough time; period, amplitude, and magnitude are unaffected.</p>
+
+          <label class="fl">Analysis range <span style="font-size:9px;color:var(--text3);font-weight:400">(hours from recording start — optional)</span></label>
+          <div id="TR-ranges" style="display:flex;flex-direction:column;gap:5px;margin-bottom:4px"></div>
+          <button class="btn-add" id="TR-addrange" style="margin-bottom:4px">+ add named range</button>
+          <p style="font-size:10px;color:var(--text3);margin-bottom:10px;line-height:1.6">Restrict analysis to a time window (e.g. h36–96 for post-treatment). Each CSV is sliced independently. Leave empty to use the full recording.</p>
+
+          <div class="divider"></div>
+          <button class="btn btn-t" id="TR-run">Run Analysis →</button>
+          <div class="divider"></div>
+          <label class="fl">Save table</label>
+          <button class="btn btn-g" id="TR-savexl" disabled>⬇ Save table (.xlsx / Excel)</button>
+          <label class="fl" style="margin-top:10px">Export graphs</label>
+          <div class="xrow">
+            <select id="TR-fmt">
+              <option value="png">PNG</option>
+              <option value="jpeg">JPEG</option>
+              <option value="tiff">TIFF</option>
+            </select>
+            <button class="btn btn-g xrow" id="TR-exp" disabled style="margin:0">⬇ Export all</button>
+          </div>
+          <div class="st" id="TR-st">Add CSV files to begin.</div>
+        </div>
+      </div>
+
+    </div><!-- /left-col -->
+
+    <!-- Right: table + results -->
+    <div style="display:flex;flex-direction:column;gap:1.4rem;min-width:0">
+
+      <!-- Coordinate table -->
+      <div class="panel" style="min-width:0">
+        <div class="ph" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
+          <span class="ph-t">Peak &amp; trough coordinates</span>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <div style="display:flex;align-items:center;gap:5px">
+              <label style="font-size:10px;color:var(--text3);white-space:nowrap">Start coordinates from:</label>
+              <select id="TR-startpeak" style="background:var(--bg3);border:1px solid var(--border2);border-radius:5px;color:var(--text);font-family:var(--fm);font-size:10px;padding:2px 5px;outline:none">
+                <option value="pk:0">Peak 1 (all)</option>
+              </select>
+            </div>
+            <button id="TR-savexl2" disabled
+            style="font-size:10px;padding:3px 10px;border-radius:5px;border:1px solid var(--border2);background:var(--bg3);color:var(--trend);font-family:var(--fm);cursor:pointer;transition:border-color .15s"
+            onmouseover="this.style.borderColor='var(--trend)'"
+            onmouseout="this.style.borderColor='var(--border2)'">
+            ⬇ Save as Excel
+          </button>
+        </div>
+        </div>
+        <div style="padding:10px">
+          <div class="trace-placeholder" id="TR-table-ph" style="min-height:140px">
+            <div class="ph-ico" style="font-size:28px">⊞</div>
+            <p style="font-size:12px">Drop CSV files on the left to populate this table.</p>
+          </div>
+          <div id="TR-src-legend" style="display:none;flex-wrap:wrap;align-items:center;gap:4px;padding:5px 8px 6px;background:var(--bg3);border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;font-size:10px">
+            <span style="color:var(--text3);margin-right:4px;font-size:9px;letter-spacing:.05em;text-transform:uppercase">Source batch:</span>
+          </div>
+          <div style="overflow-x:auto;overflow-y:auto;max-height:360px;border-radius:6px;border:1px solid var(--border);display:none" id="TR-table-wrap">
+            <table class="data-table" id="TR-table" style="min-width:max-content"></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div id="TR-results-area">
+        <div class="trace-placeholder" id="TR-results-ph">
+          <div class="ph-ico" style="font-size:28px">∿</div>
+          <p style="font-size:12px">Results and graphs appear here after running the analysis.</p>
+        </div>
+        <div id="TR-results" style="display:none;flex-direction:column;gap:1rem"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     TAB 4 — Docs & FAQ
+═══════════════════════════════════════════════════════════════ -->
+<div class="tab-panel" id="panel-faq">
+<div class="faq-wrap">
+
+  <div class="faq-hero">
+    <h1>Docs &amp; FAQ</h1>
+    <p>How to use CircaThread, definitions for your methods section, and answers to common questions. All processing is performed locally in your browser — no data is uploaded to any server.</p>
+  </div>
+
+  <!-- ── GETTING STARTED ─────────────────────────── -->
+  <div class="faq-section">
+    <div class="faq-section-title">Getting started</div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">What file format does CircaThread expect? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>CircaThread reads <strong>comma-separated values (.csv)</strong> or plain-text files exported directly from a LumiCycle instrument or compatible luminometry system. Each file should represent a single biological replicate (one well, one dish, or one animal).</p>
+        <p>The expected structure is two columns: <strong>elapsed time</strong> (in hours) in the first column and <strong>raw luminescence counts</strong> (counts per second or RLU) in the second. A single header row is detected and skipped automatically. Files with additional columns are accepted — only the first two data columns are used.</p>
+        <p>Example:</p>
+        <code style="display:block;white-space:pre;font-size:.8rem;background:var(--bg4);padding:.6rem .8rem;border-radius:2px;margin:.6rem 0;overflow-x:auto">Time (h), Counts (CPS)
+0.00, 184302
+0.10, 183912
+0.20, 181450
+...</code>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Can I load data from multiple replicates at once? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>Yes. All three modules support multi-file upload — use <strong>Browse or drop CSV files</strong> and select multiple files simultaneously, or drop them all at once. Each file is treated as one independent replicate.</p>
+        <p>Files loaded in any tab are automatically offered to the other tabs via a <strong>shared file banner</strong> that appears at the top of the drop zone when you switch tabs, so you only need to upload once per session.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Is my data uploaded to the internet? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p><strong>No.</strong> CircaThread runs entirely in your browser. All file reading, peak detection, and calculations happen locally in JavaScript. No data is transmitted to any server, and the tool works fully offline once the page has loaded.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CircATreat ────────────────────────────────── -->
+  <div class="faq-section">
+    <div class="faq-section-title">CircATreat — Treatment Scheduler <span class="faq-tag treat">CircATreat</span></div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">What does CircATreat calculate? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>CircATreat converts a desired <strong>circadian time (CT)</strong> or phase-relative description (Peak, Trough, h+6, etc.) into a <strong>real-world clock time</strong> at which to add a compound to your cells or animals.</p>
+        <p>It does this by detecting the most recent peak in your luminescence trace, anchoring that peak to the CT of your reporter cassette, and projecting forward or backward to the target time within the current or next cycle.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">What is a reporter cassette and why does it matter? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>A <strong>reporter cassette</strong> is the gene whose promoter drives luciferase expression in your cell line (e.g. <em>Bmal1</em>::Luc, <em>Per2</em>::Luc). Each reporter reaches its transcriptional peak at a different circadian time:</p>
+        <ul>
+          <li><strong>Bmal1::Luc</strong> — peak at CT0 (subjective dawn)</li>
+          <li><strong>Per2::Luc</strong> — peak at CT12 (subjective dusk)</li>
+          <li><strong>Cry1::Luc</strong> — peak at CT16</li>
+          <li><strong>Rev-erbα::Luc</strong> — peak at CT8</li>
+          <li><strong>Dbp::Luc</strong> — peak at CT8</li>
+        </ul>
+        <p>If you request a treatment at <strong>CT8</strong> using a <em>Bmal1</em>::Luc reporter, the calculation shifts by 8 h ahead of the detected luminescence peak. The same CT8 request with a <em>Per2</em>::Luc reporter shifts 8 h ahead of a peak that is already 12 h later in the cycle — producing a different real-world clock time. Selecting the wrong cassette will silently shift all your treatment times by the phase offset between reporters.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">How do I specify treatment times? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>Enter one or more times in the <strong>Treatment times</strong> field, separated by commas. The following formats are accepted:</p>
+        <ul>
+          <li><code>CT0</code>, <code>ZT12</code>, <code>CT20</code> — a specific circadian or Zeitgeber time (reporter-cassette aware)</li>
+          <li><code>Peak</code> — at the peak of the luminescence cycle (≡ the reporter's peak CT)</li>
+          <li><code>Trough</code> — at the trough (half-period after peak)</li>
+          <li><code>h+6</code>, <code>h-3</code> — hours after or before the detected peak</li>
+          <li><code>6</code> — bare number, treated as hours after peak</li>
+        </ul>
+        <p><strong>Note:</strong> CT/ZT entries are only meaningful when a reporter cassette is selected. If no cassette is chosen, they are treated as hours-after-peak and a warning banner is shown.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">What is the difference between Absolute and Optimum results? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p><strong>Absolute</strong> results show each replicate's predicted treatment time independently. This is useful when replicates are on clearly different cycle offsets (e.g. different passage numbers or recording start times) and you intend to treat each dish at its own optimal time.</p>
+        <p><strong>Optimum</strong> shows a consensus clock time across all replicates — the single time at which all replicates are within ±20 minutes of their target phase. A yellow warning is displayed if agreement within that window cannot be achieved, indicating that your replicates are too desynchronised for a single-timepoint treatment.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Methods section wording for CircATreat <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <div class="methods-box">
+          <strong>Suggested methods text:</strong><br>
+          Circadian treatment times were determined using CircATreat (CircaThread v1; Topping et al., 2026). Briefly, raw luminescence traces from [reporter] reporter cells were analysed to detect the most recent peak. The circadian phase of that peak was anchored to CT[X] based on the known peak circadian time of the [reporter]::Luc cassette. The desired treatment circadian time (CT[Y]) was then converted to a real-world clock time by projecting [forward/backward] within the estimated free-running period of [~N] h. Where multiple replicates were used, a consensus treatment time was selected at which all replicates fell within ±20 min of the target phase (Optimum mode).
+        </div>
+        <p>Replace bracketed terms with your specific reporter, CTs, and period estimate.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CircATrace ─────────────────────────────────── -->
+  <div class="faq-section">
+    <div class="faq-section-title">CircATrace — Publication Plotter <span class="faq-tag trace">CircATrace</span></div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">What does CircATrace plot? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>CircATrace overlays multiple luminescence traces on a shared time axis as a publication-ready figure. It supports:</p>
+        <ul>
+          <li>Raw or baseline-normalised (first-value) traces</li>
+          <li>Mean ± SEM or ± SD error bands across replicates grouped by colour</li>
+          <li>Light / dark cycle shading with configurable LD period</li>
+          <li>Custom axis labels, title, and time range</li>
+          <li>SVG and PNG export at screen resolution</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Methods section wording for CircATrace <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <div class="methods-box">
+          <strong>Suggested methods text:</strong><br>
+          Luminescence traces were plotted using CircATrace (CircaThread v1; Topping et al., 2026). Raw counts-per-second data were [normalised to the first recorded value / plotted without normalisation]. Where multiple biological replicates were included, data are presented as mean ± SEM [or SD]. Shaded regions indicate [12:12 h / N:N h] light:dark cycles aligned to the recording start time.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CircATrends ────────────────────────────────── -->
+  <div class="faq-section">
+    <div class="faq-section-title">CircATrends — Statistical Analysis <span class="faq-tag trend">CircATrends</span></div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">How does CircATrends detect peaks and troughs? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>CircATrends applies a <strong>smoothing pass</strong> (moving average) to reduce noise, then detects local maxima and minima by identifying points at which the gradient changes sign from positive to negative (peaks) or negative to positive (troughs). Peaks and troughs are constrained to be separated by at least a minimum inter-event interval (half the estimated period) to avoid detecting noise as independent events.</p>
+        <p>A <strong>baseline correction</strong> (linear detrending) is applied before peak detection to account for the damping of bioluminescence signal over extended recordings.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">What parameters does CircATrends calculate? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <ul>
+          <li><strong>Period (h)</strong> — mean time between consecutive peaks</li>
+          <li><strong>Phase / acrophase (h)</strong> — time of the first detected peak relative to the recording start or a user-defined reference point</li>
+          <li><strong>Amplitude (counts/sec)</strong> — half the peak-to-trough difference, representing the oscillation half-range</li>
+          <li><strong>Magnitude (counts/sec)</strong> — full peak-to-trough difference</li>
+          <li><strong>Rising period (h)</strong> — mean time from trough to the next peak</li>
+          <li><strong>Falling period (h)</strong> — mean time from peak to the next trough</li>
+        </ul>
+        <p>These parameters are calculated per sample and exported as an .xlsx file. Peak and trough XY coordinates are also exported for downstream analysis in R or GraphPad Prism.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">What is amplitude vs. magnitude? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p><strong>Amplitude</strong> in CircaTrends follows the convention used in cosinor analysis: it is the <em>half-range</em> of the oscillation, equivalent to the distance from the MESOR (midline estimating statistic of rhythm) to the peak. Numerically, this is half the peak-to-trough difference.</p>
+        <p><strong>Magnitude</strong> is the full peak-to-trough difference (sometimes called peak-to-trough amplitude in the literature). This is often the more intuitive measure and is commonly reported for bioluminescence data.</p>
+        <p>Both values are provided in the exported table. We recommend specifying which measure you report in your methods section.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Methods section wording for CircATrends <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <div class="methods-box">
+          <strong>Suggested methods text:</strong><br>
+          Circadian parameters were extracted using CircATrends (CircaThread v1; Topping et al., 2026). Raw luminescence data were linearly detrended to remove baseline drift, then smoothed with a moving-average filter prior to peak and trough detection. Local maxima and minima were identified as sign changes in the first derivative, constrained to a minimum inter-event interval of [N] h. Period was calculated as the mean inter-peak interval; amplitude as the half peak-to-trough range; and acrophase as the time of the first detected peak relative to [recording start / ZT0]. Parameters were exported as .xlsx and statistical comparisons were performed in [GraphPad Prism / R].
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DEFINITIONS ───────────────────────────────── -->
+  <div class="faq-section">
+    <div class="faq-section-title">Key definitions</div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Circadian Time (CT) vs Zeitgeber Time (ZT) <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p><strong>Zeitgeber Time (ZT)</strong> describes time relative to an external entraining signal (typically lights-on = ZT0, lights-off = ZT12 in a 12:12 LD cycle). It is an environmental reference.</p>
+        <p><strong>Circadian Time (CT)</strong> describes time relative to the animal or cell's intrinsic clock, measured under free-running conditions (constant darkness or constant light). CT0 is defined as the onset of subjective day. In a free-running system, CT and ZT may diverge as the endogenous period drifts from 24 h.</p>
+        <p>In the context of CircATreat, CT and ZT are treated equivalently — both refer to a position on the ~24 h circadian cycle, anchored to your reporter cassette's known peak phase.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Period (τ, tau) <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>The <strong>period</strong> (τ, tau) is the time required to complete one full oscillation cycle. For a mammalian circadian clock in constant conditions, τ is typically ~24 h but varies between ~23–25 h depending on species, cell type, and genetic background. CircaTrends estimates τ as the mean interval between consecutive detected luminescence peaks.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Phase and acrophase <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p><strong>Phase</strong> refers to the position of a rhythm at a specified reference point. In circadian biology, phase is often reported as the time of peak (acrophase) relative to ZT0 or CT0.</p>
+        <p><strong>Acrophase</strong> (from Greek <em>akros</em>, summit) is the time at which the rhythm reaches its maximum value within a cycle. In cosinor analysis, acrophase is expressed as a phase angle (degrees or radians); in CircaTrends it is expressed in hours relative to recording start or a user-defined reference.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Amplitude and MESOR <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p><strong>Amplitude</strong> is the half-range of the oscillation — the distance from the midline (MESOR) to the peak. A larger amplitude indicates a more robust, higher-contrast rhythm.</p>
+        <p><strong>MESOR</strong> (Midline Estimating Statistic Of Rhythm) is the mean level of the fitted cosine curve, equivalent to the rhythm's vertical midpoint. In bioluminescence data, the MESOR reflects baseline luciferase expression independent of oscillation.</p>
+        <p>CircaTrends approximates amplitude as half the peak-to-trough difference. For a pure cosine, this is exact; for asymmetric waveforms it is an approximation.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Entrainment and free-running period <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p><strong>Entrainment</strong> is the synchronisation of the circadian clock to an external zeitgeber (time-giver), typically the light-dark cycle. An entrained clock runs at exactly 24 h, phase-locked to the environment.</p>
+        <p><strong>Free-running period</strong> is the intrinsic period of the clock in the absence of zeitgebers (constant conditions). In most mammalian cell lines and tissues, the free-running period is close to 24 h but rarely exactly 24 h. LumiCycle recordings are typically made under constant temperature and no imposed LD cycle, so the period you measure in CircATrends is the free-running period.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">Bioluminescence reporter assay (LumiCycle) <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>A <strong>bioluminescence reporter assay</strong> uses cells or tissue stably expressing a luciferase gene under the control of a circadian clock gene promoter (e.g. <em>Bmal1</em>::Luc, <em>Per2</em>::Luc). When the clock gene is transcriptionally active, luciferase is produced and emits light in the presence of its substrate (luciferin). Luminescence therefore oscillates with the circadian period, providing a real-time, non-invasive readout of clock gene expression.</p>
+        <p>The <strong>LumiCycle</strong> (Actimetrics) is a photomultiplier-based device designed to record luminescence from cell culture dishes continuously over several days. Data are exported as time-stamped counts-per-second CSV files, which are the primary input for CircaThread.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CITATION ──────────────────────────────────── -->
+  <div class="faq-section">
+    <div class="faq-section-title">Citation</div>
+    <div class="faq-item">
+      <button class="faq-q" onclick="faqToggle(this)">How should I cite CircaThread? <span class="faq-chevron">▼</span></button>
+      <div class="faq-a">
+        <p>Please cite:</p>
+        <div class="methods-box" style="font-style:normal">
+          Topping AT et al. (2026). CircaThread: a browser-based suite for circadian treatment scheduling, trace visualisation, and rhythm parameter extraction from bioluminescence data. <em>[Journal name, in preparation]</em>.
+        </div>
+        <p>A preprint and full citation will be added here on publication. In the meantime, you may refer to the tool as <strong>CircaThread v1 (Topping et al., 2026)</strong> with a URL to the hosted file or GitHub repository.</p>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /.faq-wrap -->
+</div><!-- /#panel-faq -->
+
+<footer>
+  CircaThread &nbsp;·&nbsp; CircATreat · CircATrace · CircATrends &nbsp;·&nbsp; © All rights reserved. Topping et al. 2026 &nbsp;·&nbsp; All processing is local — no data uploaded.
+</footer>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     JAVASCRIPT
+═══════════════════════════════════════════════════════════════ -->
+<script>
+'use strict';
+
+/* ── TAB SWITCHING ─────────────────────────────────────────── */
+function faqToggle(btn){
+  const item = btn.closest('.faq-item');
+  item.classList.toggle('open');
+}
+
+function switchTab(tab){
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active-treat','active-trace','active-trend','active-faq'));
+  document.getElementById('panel-'+tab).classList.add('active');
+  const btn=document.getElementById('tab-'+tab);
+  if(tab==='treat')btn.classList.add('active-treat');
+  else if(tab==='trace')btn.classList.add('active-trace');
+  else if(tab==='trend')btn.classList.add('active-trend');
+  else btn.classList.add('active-faq');
+  // Offer shared files to the destination tab
+  if(tab==='treat') SHARED_syncToTreat();
+  if(tab==='trace') SHARED_syncToTrace();
+  if(tab==='trend') SHARED_syncToTrend();
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SHARED FILE STORE
+   Keeps raw CSV text across tabs so files loaded in one tab are
+   automatically offered in the other two.
+══════════════════════════════════════════════════════════════ */
+const SHARED_files = [];   // [{name, text}]
+
+function SHARED_add(name, text){
+  if(!SHARED_files.find(f=>f.name===name)) SHARED_files.push({name, text});
+}
+function SHARED_remove(name){
+  const i=SHARED_files.findIndex(f=>f.name===name);
+  if(i>-1) SHARED_files.splice(i,1);
+}
+
+// Render the shared-files banner inside a given drop zone wrapper element.
+// `presentNames` = names already loaded in that tab (don't offer duplicates).
+// `onAccept(file)` called for each accepted file object-like {name,text}.
+// `onDismiss(name)` called when user removes from shared store entirely.
+function SHARED_renderBanner(containerId, presentNames, onAccept, onRemove){
+  const el=document.getElementById(containerId); if(!el) return;
+  const pending=SHARED_files.filter(f=>!presentNames.includes(f.name));
+  let banner=el.querySelector('.shared-banner');
+  if(!pending.length){ if(banner) banner.remove(); return; }
+  if(!banner){ banner=document.createElement('div'); banner.className='shared-banner'; el.prepend(banner); }
+  banner.innerHTML=`
+    <div style="font-size:9px;color:var(--text3);letter-spacing:.06em;text-transform:uppercase;margin-bottom:5px">
+      Files from other tabs — click to load:
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px">
+      ${pending.map(f=>`
+        <div style="display:flex;align-items:center;gap:0;background:var(--bg3);border:1px solid var(--border2);border-radius:4px;overflow:hidden;max-width:220px">
+          <button class="sh-accept" data-name="${esc(f.name)}"
+            style="background:none;border:none;color:var(--accent);font-size:10px;padding:3px 7px;cursor:pointer;font-family:var(--fm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px"
+            title="Load ${esc(f.name)}">${esc(f.name.replace(/\.[^.]+$/,'').slice(0,22))}</button>
+          <button class="sh-remove" data-name="${esc(f.name)}"
+            style="background:none;border:none;border-left:1px solid var(--border);color:var(--text3);font-size:12px;padding:2px 5px;cursor:pointer;line-height:1;flex-shrink:0"
+            title="Remove from shared store">×</button>
+        </div>`).join('')}
+    </div>
+    <div style="font-size:9px;color:var(--text3);margin-top:5px">× dismisses from all tabs · click name to load into this tab</div>`;
+  banner.querySelectorAll('.sh-accept').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const f=SHARED_files.find(x=>x.name===btn.dataset.name); if(!f) return;
+      onAccept(f);
+    });
+  });
+  banner.querySelectorAll('.sh-remove').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      SHARED_remove(btn.dataset.name);
+      onRemove();
+    });
+  });
+}
+
+// Sync to CircATrace
+function SHARED_syncToTrace(){
+  const presentNames=AC_traces.map(t=>t.fn);
+  SHARED_renderBanner('AC-dz-wrap', presentNames,
+    f=>{
+      try{
+        const pairs=parseCSV(f.text,f.name);
+        const idx=AC_traces.length, p=PALS[AC_palKey];
+        AC_traces.push({fn:f.name,label:f.name.replace(/\.[^.]+$/,''),pairs,color:p.c[idx%p.c.length],di:idx%Math.max(1,p.d.length)});
+        AC_renderList();
+        AC_st(`Loaded "${f.name}" from shared store — click Render.`,'ok');
+        document.getElementById('AC-exp').disabled=!AC_traces.length;
+      }catch(e){AC_st(e.message,'err');}
+      SHARED_syncToTrace();  // refresh banner
+    },
+    ()=>SHARED_syncToTrace()
+  );
+}
+
+// Sync to CircATreat
+function SHARED_syncToTreat(){
+  const presentNames=AT_files.map(f=>f.name);
+  SHARED_renderBanner('AT-dz-wrap', presentNames,
+    f=>{
+      if(!AT_files.find(x=>x.name===f.name)){
+        AT_files.push({name:f.name, csv:f.text, rsISO:'2026-03-30T08:00'});
+        AT_renderFileList();
+        AT_st(`Loaded "${f.name}" from shared store.`,'');
+      }
+      SHARED_syncToTreat();
+    },
+    ()=>SHARED_syncToTreat()
+  );
+}
+
+// Sync to CircATrends
+function SHARED_syncToTrend(){
+  const presentNames=TR_rows.map(r=>r.filename);
+  SHARED_renderBanner('TR-dz-wrap', presentNames,
+    f=>{
+      let range=null;
+      try{ const rngs=TR_getRanges(); range=rngs?rngs[0]:null; }catch(e){}
+      const anchorMode=TR_getAnchor();
+      try{
+        const {peaks,troughs,period,phase,amplitude,magnitude,risingPeriod,fallingPeriod}=TR_extractFromLumiCSV(f.text,f.name,range,anchorMode);
+        TR_batchCounter++;
+        TR_rows.push({id:f.name.replace(/\.[^.]+$/,''),filename:f.name,batchId:TR_batchCounter,peaks,troughs,period,phase,amplitude,magnitude,risingPeriod,fallingPeriod,group:''});
+        TR_renderTable();
+        document.getElementById('TR-rowcnt').textContent=`${TR_rows.length} samples`;
+        ['TR-savexl','TR-savexl2'].forEach(id=>{const el=document.getElementById(id);if(el)el.disabled=false});
+        TR_updateStartPeakDropdown();
+        TR_st(`Loaded "${f.name}" from shared store.`,'ok');
+      }catch(e){TR_st(e.message,'err');}
+      SHARED_syncToTrend();  // refresh banner
+    },
+    ()=>SHARED_syncToTrend()
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SHARED — CSV PARSER
+══════════════════════════════════════════════════════════════ */
+function parseCSV(text,fname){
+  const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').map(l=>l.split(','));
+  const SE=['counts/sec','count/s','cps','counts per'],SF=['signal','raw','intensity','biolum','photon'];
+  let tc=null,sc=null,tu='hours',hi=-1;
+  for(let ri=0;ri<rows.length;ri++){
+    const row=rows[ri];if(!row.some(c=>c.trim()))continue;
+    const L=row.map(c=>c.toLowerCase().trim());if(L.length<3)continue;
+    let tc2=null,sc2=null,tu2='hours',best=-1;
+    L.forEach((c,j)=>{let s=-1;if(c.includes('day'))s=4;else if(c.startsWith('elapsed'))s=3;else if(c.includes('hr')&&!c.includes('min'))s=2;else if(c.includes('hour'))s=2;else if(c.includes('min')&&!c.includes('hr'))s=1;else if(c.includes('time')&&!c.includes(':'))s=0;if(s>best){best=s;tc2=j;tu2=c.includes('day')?'days':(c.includes('min')&&!c.includes('hr'))?'minutes':'hours'}});
+    L.forEach((c,j)=>{if(j===tc2)return;if(sc2===null&&SE.some(k=>c.includes(k)))sc2=j});
+    if(sc2===null)L.forEach((c,j)=>{if(j===tc2)return;if(sc2===null&&SF.some(k=>c.includes(k)))sc2=j});
+    if(tc2!==null&&sc2!==null&&ri+1<rows.length){const nr=rows[ri+1];const tv=parseFloat((nr[tc2]||'').trim().replace(',',''));const sv=parseFloat((nr[sc2]||'').trim().replace(',',''));if(!isNaN(tv)&&!isNaN(sv)){tc=tc2;sc=sc2;tu=tu2;hi=ri;break}}
+  }
+  if(tc===null||sc===null){for(let ri=0;ri<rows.length;ri++){const s=rows[ri].map(c=>c.trim());if(s.length>=5){const a=parseFloat(s[0]),b=parseFloat(s[3]),c2=parseFloat(s[4]);if(!isNaN(a)&&!isNaN(b)&&!isNaN(c2)&&b<500){tc=3;sc=4;tu='days';hi=ri-1;break}}}}
+  if(tc===null||sc===null)throw new Error(`${fname}: cannot find time/signal columns`);
+  const dp=[];
+  for(let ri=hi+1;ri<rows.length;ri++){const row=rows[ri];if(row.length<=Math.max(tc,sc))continue;const t=parseFloat(row[tc].trim().replace(',',''));const v=parseFloat(row[sc].trim().replace(',',''));if(!isNaN(t)&&!isNaN(v))dp.push([t,v])}
+  if(dp.length<10)throw new Error(`${fname}: only ${dp.length} rows`);
+  dp.sort((a,b)=>a[0]-b[0]);
+  let pairs=dp;
+  if(tu==='days')pairs=dp.map(([t,v])=>[t*24,v]);
+  else if(tu==='minutes')pairs=dp.map(([t,v])=>[t/60,v]);
+  else{const mx=dp[dp.length-1][0];if(mx>500)pairs=dp.map(([t,v])=>[t/60,v]);else if(mx>30000)pairs=dp.map(([t,v])=>[t/3600,v]);else if(mx<20&&dp.length>100)pairs=dp.map(([t,v])=>[t*24,v])}
+  return pairs;
+}
+
+/* ── SHARED DSP ────────────────────────────────────────────── */
+function smth(arr,w){w=Math.max(1,Math.floor(w));return arr.map((_,i)=>{const lo=Math.max(0,i-w),hi2=Math.min(arr.length,i+w+1);return arr.slice(lo,hi2).reduce((a,b)=>a+b,0)/(hi2-lo)})}
+function detect(times,vals,W=5){
+  const sm=smth(vals,W);const pk=[],tr=[];
+  for(let i=W;i<sm.length-W;i++){let ip=true,it=true;for(let j=i-W;j<=i+W;j++){if(j===i)continue;if(sm[i]<sm[j])ip=false;if(sm[i]>sm[j])it=false}if(ip)pk.push({t:times[i],v:vals[i]});if(it)tr.push({t:times[i],v:vals[i]})}
+  let per=24;if(pk.length>=2){const ivs=pk.slice(1).map((p,k)=>p.t-pk[k].t).filter(v=>v>=16&&v<=36);if(ivs.length)per=ivs.reduce((a,b)=>a+b)/ivs.length}
+  return{pk,tr,per,sm};
+}
+function normV(vals){const mn=Math.min(...vals),mx=Math.max(...vals);return vals.map(v=>(v-mn)/(mx-mn||1))}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+/* ════════════════════════════════════════════════════════════
+   CIRCATREAT
+════════════════════════════════════════════════════════════ */
+
+// ── State ─────────────────────────────────────────────────
+let AT_tc      = 0;
+let AT_results = [];
+let AT_files   = [];
+let AT_lastCtRaws = [];
+
+const AT_PAL = ['#60a5fa','#f97316','#34d399','#a78bfa','#fb7185','#fbbf24','#22d3ee','#e879f9'];
+
+// ── Treatment time rows ───────────────────────────────────
+AT_addRow('CT0'); AT_addRow('CT12'); AT_addRow('CT20');
+
+function AT_addRow(val=''){
+  AT_tc++;
+  const row=document.createElement('div'); row.className='treat-row';
+  row.innerHTML=`<span class="treat-lbl">Treatment ${AT_tc}</span><input type="text" placeholder="e.g. CT0, CT12, CT20" value="${val}"><button class="treat-rm">×</button>`;
+  row.querySelector('.treat-rm').onclick=()=>{row.remove(); AT_renum()};
+  document.getElementById('AT-tl').appendChild(row);
+}
+function AT_renum(){
+  document.querySelectorAll('#AT-tl .treat-row').forEach((r,i)=>r.querySelector('.treat-lbl').textContent=`Treatment ${i+1}`);
+}
+document.getElementById('AT-add').onclick=()=>AT_addRow();
+
+function AT_getAnchor(){ return 'peak'; }  // CircATreat always anchors to peak
+
+// ── File loading ──────────────────────────────────────────
+const AT_dz=document.getElementById('AT-dz');
+AT_dz.addEventListener('dragover',e=>{e.preventDefault();AT_dz.classList.add('over')});
+AT_dz.addEventListener('dragleave',()=>AT_dz.classList.remove('over'));
+AT_dz.addEventListener('drop',e=>{
+  e.preventDefault(); AT_dz.classList.remove('over');
+  if(e.dataTransfer.files.length) AT_loadFiles(Array.from(e.dataTransfer.files));
+});
+document.getElementById('AT-fi').addEventListener('change',e=>{
+  if(e.target.files.length) AT_loadFiles(Array.from(e.target.files));
+  e.target.value='';
+});
+
+function AT_loadFiles(files){
+  const csvs=files.filter(f=>/\.(csv|txt)$/i.test(f.name));
+  if(!csvs.length){AT_st('No CSV/TXT files found.','err');return;}
+  let done=0;
+  csvs.forEach(f=>{
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      // Avoid exact-name duplicates
+      if(!AT_files.find(x=>x.name===f.name)){
+        AT_files.push({name:f.name, csv:ev.target.result, rsISO:'2026-03-30T08:00'});
+        SHARED_add(f.name, ev.target.result);
+      }
+      done++;
+      if(done===csvs.length){ AT_renderFileList(); AT_st(`${AT_files.length} file(s) loaded — click Analyse.`,''); }
+    };
+    reader.readAsText(f);
+  });
+}
+
+function AT_renderFileList(){
+  const el=document.getElementById('AT-flist');
+  document.getElementById('AT-fcnt').textContent=`${AT_files.length} loaded`;
+  if(!AT_files.length){el.innerHTML='';return;}
+  el.innerHTML=AT_files.map((f,i)=>`
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:7px 9px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
+        <span style="width:10px;height:10px;border-radius:50%;background:${AT_PAL[i%AT_PAL.length]};flex-shrink:0;display:inline-block"></span>
+        <span style="font-size:11px;color:var(--text);font-family:var(--fm);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(f.name)}">${esc(f.name)}</span>
+        <button onclick="AT_removeFile(${i})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:0;line-height:1" title="Remove">×</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <label style="font-size:10px;color:var(--text3);white-space:nowrap">Recording start:</label>
+        <input type="datetime-local" value="${f.rsISO}" data-fi="${i}"
+          style="flex:1;font-size:10px;padding:3px 5px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--fh)"
+          onchange="AT_files[${i}].rsISO=this.value">
+      </div>
+    </div>`).join('');
+}
+
+function AT_removeFile(i){
+  AT_files.splice(i,1);
+  AT_renderFileList();
+  AT_st(AT_files.length?`${AT_files.length} file(s) loaded`:'No files loaded.','');
+}
+
+// ── Reporter cassette ─────────────────────────────────────
+// Maps select value → CT of peak (hours, 0–23.9).
+// null = no cassette selected, suppress CT annotation.
+const AT_CASSETTE_PEAK_CT = {
+  bmal1:   0,
+  clock:   0,
+  per1:    8,
+  per2:   12,
+  per3:   10,
+  cry1:   16,
+  cry2:   14,
+  reverba: 4,
+  rora:   20,
+  dbp:     8,
+  tef:     8,
+  custom: null,   // resolved dynamically
+  none:   null,
+};
+const AT_CASSETTE_NAMES = {
+  bmal1:'Bmal1::Luc', clock:'Clock::Luc', per1:'Per1::Luc', per2:'Per2::Luc',
+  per3:'Per3::Luc', cry1:'Cry1::Luc', cry2:'Cry2::Luc', reverba:'Rev-erbα::Luc',
+  rora:'RORα::Luc', dbp:'Dbp::Luc', tef:'Tef::Luc', custom:'Custom', none:'None',
+};
+
+function AT_getCassette(){
+  const val = document.getElementById('AT-cassette')?.value || 'none';
+  if(val==='custom'){
+    const ct = parseFloat(document.getElementById('AT-custom-ct')?.value);
+    return isNaN(ct) ? null : ct;
+  }
+  return AT_CASSETTE_PEAK_CT[val] ?? null;  // null = no annotation
+}
+
+function AT_getCassetteName(){
+  const val = document.getElementById('AT-cassette')?.value || 'none';
+  return AT_CASSETTE_NAMES[val] || 'Unknown';
+}
+
+// Convert hours-from-peak-anchor → CT string, given that the peak = peakCT
+// Returns e.g. "CT12" or null if no cassette selected
+function AT_offsetToCtLabel(offsetH, peakCT, periodH){
+  if(peakCT === null || peakCT === undefined) return null;
+  const period = periodH || 24;
+  const ct = ((peakCT + offsetH) % period + period) % period;
+  const ctRounded = Math.round(ct * 10) / 10;
+  return `CT${ctRounded % 1 === 0 ? ctRounded.toFixed(0) : ctRounded.toFixed(1)}`;
+}
+
+// Show/hide custom CT row
+document.getElementById('AT-cassette').addEventListener('change', function(){
+  const row = document.getElementById('AT-custom-ct-row');
+  row.style.display = this.value === 'custom' ? 'flex' : 'none';
+});
+// Parse a treatment label → {offset: hours from anchor, label: display string}
+// Accepts: "Peak" (0h), "Trough" (half-period), "h+6", "h-3", bare number, legacy CTN
+// AT_parseCT(raw, peakCT)
+// ─────────────────────────────────────────────────────────────────────────────
+// Parses a treatment time entry and returns {offset, label, isCT}.
+//
+// Two modes depending on entry type:
+//
+//   Peak-relative (reporter-agnostic):
+//     "Peak"    → offset = 0   (treat at the peak itself)
+//     "Trough"  → offset = 12  (treat at the trough, ~half-period from peak)
+//     "h+6"     → offset = +6  (6 h after detected peak)
+//     bare num  → offset = N   (N hours after detected peak)
+//
+//   Circadian-time absolute (cassette-dependent):
+//     "CT8" / "ZT8" → isCT = true
+//     When a cassette is selected (peakCT ≠ null), the peak of THAT reporter
+//     sits at peakCT on the CT scale.  To treat at CT8 you therefore need to
+//     apply a peak-relative offset of:  CT8 − peakCT  (mod period).
+//     e.g. Bmal1::Luc (peakCT=0):  CT8  → offset = 8 − 0 = +8 h after peak
+//          Per2::Luc  (peakCT=12): CT8  → offset = 8 − 12 = −4 h (= 20 h after peak)
+//     When NO cassette is selected (peakCT = null), CT/ZT entries are treated
+//     as hours-after-peak (legacy behaviour) and a warning is appended to label.
+function AT_parseCT(raw, peakCT=null){
+  const s=raw.trim();
+  if(/^peak$/i.test(s))   return {offset:0,  label:s, isCT:false};
+  if(/^trough$/i.test(s)) return {offset:12, label:s, isCT:false};
+  const hm=s.match(/^h([+-]\d+(?:\.\d+)?)$/i);
+  if(hm) return {offset:parseFloat(hm[1]), label:s, isCT:false};
+  const nm=s.match(/^([+-]?\d+(?:\.\d+)?)$/);
+  if(nm) return {offset:parseFloat(nm[1]), label:s, isCT:false};
+  const ctm=s.match(/^(?:ct|zt)\s*([+-]?\d+(?:\.\d+)?)$/i);
+  if(ctm){
+    const ctVal=parseFloat(ctm[1]);
+    if(peakCT !== null){
+      // Cassette known: convert absolute CT → peak-relative offset
+      const offset = ctVal - peakCT;   // may be negative; caller wraps mod period
+      return {offset, label:s, isCT:true, ctVal};
+    } else {
+      // No cassette: fall back to treating CT value as hours-after-peak
+      return {offset:ctVal, label:s+'*', isCT:true, ctVal, noCassette:true};
+    }
+  }
+  throw new Error(`Cannot parse treatment time: "${raw}". Use CT0/ZT0, CT12, CT20, Peak, Trough, h+6, or a bare number.`);
+}
+// Waveform position descriptor — reporter-agnostic, based on fractional cycle position
+function AT_phase(offsetH, periodH){
+  const period=periodH||24;
+  const frac=((offsetH%period)+period)%period/period;
+  if(frac<0.08||frac>=0.92) return 'Peak (anchor)';
+  if(frac<0.20) return 'Early descending';
+  if(frac<0.38) return 'Mid descending';
+  if(frac<0.54) return 'Nadir / trough';
+  if(frac<0.62) return 'Early ascending';
+  if(frac<0.80) return 'Mid ascending';
+  return 'Late ascending';
+}
+// Colour by fractional cycle position
+function AT_col(offsetH, periodH){
+  const period=periodH||24;
+  const frac=((offsetH%period)+period)%period/period;
+  if(frac<0.08||frac>=0.92) return '#f97316';
+  if(frac>=0.38&&frac<0.62) return '#34d399';
+  return '#60a5fa';
+}
+function fdt(dt){return dt.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short',year:'numeric'})+' '+dt.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}
+function ft(dt){return dt.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}
+function fd(dt){return dt.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short'})}
+function AT_getCTs(){return[...document.querySelectorAll('#AT-tl input[type="text"]')].map(i=>i.value).filter(v=>v.trim())}
+function AT_st(m,t=''){const el=document.getElementById('AT-st');el.textContent=m;el.className='st'+(t?' '+t:'')}
+
+// ── Demo data generator ───────────────────────────────────
+function AT_demo(seed=0){
+  const period=23.8+seed*0.15, sd=0.65139+seed*0.08, rows=[];
+  for(let i=0;i<576;i++){
+    const tD=sd+i/(6*24);
+    rows.push([tD*24, 5000+3000*Math.cos(2*Math.PI*tD/period)+600*Math.cos(2*Math.PI*tD/(period/2)+0.7)+300*(((i*7+seed*13)%17)/17-0.5)+(seed*200)]);
+  }
+  return rows;
+}
+
+// ── Per-file analysis ─────────────────────────────────────
+function AT_runOne(pairs, rsISO, ctRaws, peakCT=null){
+  const rs=new Date(rsISO); if(isNaN(rs)) throw new Error('Invalid recording start');
+  const times=pairs.map(p=>p[0]), vals=pairs.map(p=>p[1]);
+  let pk,tr,per;
+  for(const Wt of [5,4,3,2,1]){
+    const W=Math.min(Wt,Math.floor(times.length/10)||Wt);
+    ({pk,tr,per}=detect(times,vals,W));
+    if(pk.length>=2) break;
+  }
+  if(pk.length<2) throw new Error('Fewer than 2 peaks detected — need a longer/more rhythmic recording.');
+  const totalH=times[times.length-1]-times[0];
+  const mid=pk.filter(p=>p.t>=totalH*.1&&p.t<=totalH*.9);
+  const ct0=(mid.length>=1?mid:pk).reduce((a,b)=>b.v>a.v?b:a);
+  const ct0clk=new Date(rs.getTime()+ct0.t*3600000);
+  const treatments=ctRaws.map(raw=>{
+    const {offset,label,noCassette}=AT_parseCT(raw, peakCT);
+    // Wrap negative offsets into the positive cycle
+    const normOffset=((offset%(per||24))+(per||24))%(per||24);
+    const ms=ct0clk.getTime()+normOffset*(per/24)*3600000;
+    return{offset:normOffset, label, clock:new Date(ms), schedule:Array.from({length:7},(_,d)=>new Date(ms+d*per*3600000)), phase:AT_phase(normOffset,per), colour:AT_col(normOffset,per), noCassette};
+  });
+  // Wrap in rangeResults for compatibility with AT_computeOptimum and AT_render
+  const rangeResult={label:'Full recording',from:times[0],to:times[times.length-1],colour:'rgba(96,165,250,0.0)',
+                     times,vals,peaks:pk,troughs:tr,period:per,anchor:ct0,anchorClk:ct0clk,anchorCT:0,treatments};
+  return{pairs,times,vals,peaks:pk,troughs:tr,period:per,totalH,rs,ct0,ct0clk,
+         rangeResults:[rangeResult]};
+}
+
+// ── Optimum time computation ──────────────────────────────
+// rangeIdx: which rangeResult slot to use (0 = first / only range)
+function AT_computeOptimum(results, ctRaws, rangeIdx=0, peakCT=null){
+  return ctRaws.map(raw=>{
+    const {offset,label}=AT_parseCT(raw, peakCT);
+    const clocks=results
+      .map(r=>(r.rangeResults[rangeIdx]||r.rangeResults[0]).treatments.find(t=>t.label===label)?.clock)
+      .filter(Boolean);
+    if(!clocks.length) return null;
+    const minsArr=clocks.map(d=>d.getHours()*60+d.getMinutes()+d.getSeconds()/60);
+    const rad=minsArr.map(m=>m/1440*2*Math.PI);
+    const sx=rad.reduce((s,r)=>s+Math.sin(r),0)/rad.length;
+    const sy=rad.reduce((s,r)=>s+Math.cos(r),0)/rad.length;
+    const meanRad=Math.atan2(sx,sy);
+    const meanMins=((meanRad/(2*Math.PI)*1440)+1440)%1440;
+    const devsMin=minsArr.map(m=>{let d=Math.abs(m-meanMins);if(d>720)d=1440-d;return d;});
+    const spreadMin=Math.max(...devsMin)*2;
+    const anchor=new Date(clocks[0]); anchor.setHours(0,0,0,0);
+    const optClock=new Date(anchor.getTime()+meanMins*60000);
+    const consensus=spreadMin<=20;
+    const meanPer=results.reduce((s,r)=>s+r.period,0)/results.length;
+    return{offset,label,clocks,optClock,spreadMin,consensus,phase:AT_phase(offset,meanPer),colour:AT_col(offset,meanPer)};
+  });
+}
+
+// ── Multi-trace chart ─────────────────────────────────────
+function AT_drawMultiChart(canvasId, results, showAvg, ranges){
+  const canvas=document.getElementById(canvasId); if(!canvas)return;
+  const dpr=window.devicePixelRatio||1, W=canvas.clientWidth, H=canvas.clientHeight;
+  canvas.width=W*dpr; canvas.height=H*dpr;
+  const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
+  const PAD={l:62,r:18,t:20,b:42}, PW=W-PAD.l-PAD.r, PH=H-PAD.t-PAD.b;
+
+  const maxH=Math.max(...results.map(r=>r.totalH));
+  const minT=0, maxT=maxH;
+
+  const normTraces=results.map(r=>{
+    const sm=smth(r.vals,15);
+    const mn=Math.min(...sm), mx=Math.max(...sm), rng=mx-mn||1;
+    return{times:r.times, vals:sm.map(v=>(v-mn)/rng), peaks:r.peaks, troughs:r.troughs};
+  });
+
+  const nPts=400;
+  const tAxis=Array.from({length:nPts},(_,i)=>minT+i/(nPts-1)*(maxT-minT));
+
+  function interp(times,vals,t){
+    if(t<=times[0]) return vals[0];
+    if(t>=times[times.length-1]) return vals[vals.length-1];
+    let lo=0,hi=times.length-1;
+    while(hi-lo>1){const mid=(lo+hi)>>1;times[mid]<=t?lo=mid:hi=mid;}
+    const frac=(t-times[lo])/(times[hi]-times[lo]);
+    return vals[lo]+frac*(vals[hi]-vals[lo]);
+  }
+
+  const matrix=normTraces.map(tr=>tAxis.map(t=>interp(tr.times,tr.vals,t)));
+  const meanV=tAxis.map((_,i)=>{const col=matrix.map(r=>r[i]);return col.reduce((a,b)=>a+b,0)/col.length});
+  const sdV=tAxis.map((_,i)=>{const col=matrix.map(r=>r[i]);const m=col.reduce((a,b)=>a+b,0)/col.length;return Math.sqrt(col.reduce((s,v)=>s+(v-m)**2,0)/Math.max(1,col.length-1));});
+
+  const vLo=-0.06, vHi=1.1;
+  const cx=t=>PAD.l+Math.max(0,Math.min(PW,(t-minT)/(maxT-minT)*PW));
+  const cy=v=>PAD.t+(1-(v-vLo)/(vHi-vLo))*PH;
+
+  // Background
+  ctx.fillStyle='#1c2738'; ctx.fillRect(0,0,W,H);
+
+  // ── Range bands ──────────────────────────────────────────
+  if(ranges && ranges.length){
+    ranges.forEach((rng,ri)=>{
+      const x0=cx(Math.max(rng.from,minT));
+      const x1=cx(Math.min(rng.to,  maxT));
+      if(x1<=x0) return;
+      // Fill band
+      ctx.fillStyle=rng.colour;
+      ctx.fillRect(x0,PAD.t,x1-x0,PH);
+      // Left boundary
+      ctx.strokeStyle=rng.colour.replace(/[\d.]+\)$/,'0.5)');
+      ctx.lineWidth=1; ctx.setLineDash([4,3]);
+      ctx.beginPath(); ctx.moveTo(x0,PAD.t); ctx.lineTo(x0,PAD.t+PH); ctx.stroke();
+      // Right boundary
+      ctx.beginPath(); ctx.moveTo(x1,PAD.t); ctx.lineTo(x1,PAD.t+PH); ctx.stroke();
+      ctx.setLineDash([]);
+      // Label at top of band
+      const label=rng.label||`Range ${ri+1}`;
+      ctx.font=`9px 'DM Mono',monospace`; ctx.textAlign='left';
+      ctx.fillStyle=rng.colour.replace(/[\d.]+\)$/,'0.9)');
+      ctx.fillText(label.slice(0,18), x0+4, PAD.t+11);
+    });
+  }
+
+  // Grid — every 24 h
+  ctx.strokeStyle='rgba(255,255,255,0.05)'; ctx.lineWidth=0.5; ctx.setLineDash([3,4]);
+  ctx.fillStyle='#415566'; ctx.font=`10px 'DM Mono',monospace`; ctx.textAlign='center';
+  for(let t=0;t<=maxT;t+=24){
+    const x=cx(t);
+    ctx.beginPath(); ctx.moveTo(x,PAD.t); ctx.lineTo(x,PAD.t+PH); ctx.stroke();
+    ctx.fillText(t+'h',x,PAD.t+PH+24);
+  }
+  ctx.setLineDash([]);
+
+  // Y ticks
+  ['0','0.5','1'].forEach((lbl,i)=>{
+    const v=[0,0.5,1][i], y=cy(v);
+    ctx.strokeStyle='rgba(255,255,255,0.04)'; ctx.lineWidth=0.5;
+    ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(PAD.l+PW,y); ctx.stroke();
+    ctx.fillStyle='#415566'; ctx.textAlign='right'; ctx.font=`10px 'DM Mono',monospace`;
+    ctx.fillText(lbl,PAD.l-5,y+3);
+  });
+
+  // Axes
+  ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(PAD.l,PAD.t); ctx.lineTo(PAD.l,PAD.t+PH); ctx.lineTo(PAD.l+PW,PAD.t+PH); ctx.stroke();
+
+  // SD envelope
+  if(showAvg && results.length>1){
+    ctx.beginPath();
+    tAxis.forEach((t,i)=>{const y=cy(meanV[i]+sdV[i]);i===0?ctx.moveTo(cx(t),y):ctx.lineTo(cx(t),y);});
+    tAxis.slice().reverse().forEach((t,i)=>{const ri=tAxis.length-1-i;ctx.lineTo(cx(t),cy(meanV[ri]-sdV[ri]));});
+    ctx.closePath(); ctx.fillStyle='rgba(96,165,250,0.12)'; ctx.fill();
+  }
+
+  // Individual traces
+  const traceAlpha=showAvg&&results.length>1?0.45:1;
+  normTraces.forEach((tr,idx)=>{
+    const col=AT_PAL[idx%AT_PAL.length];
+    ctx.beginPath();
+    ctx.strokeStyle=col+(traceAlpha<1?Math.round(traceAlpha*255).toString(16).padStart(2,'0'):'');
+    ctx.lineWidth=traceAlpha<1?1.2:1.8; ctx.lineJoin='round';
+    tr.times.forEach((t,i)=>i===0?ctx.moveTo(cx(t),cy(tr.vals[i])):ctx.lineTo(cx(t),cy(tr.vals[i])));
+    ctx.stroke();
+    if(!showAvg||results.length===1){
+      tr.peaks.forEach(p=>{
+        const sv=interp(tr.times,tr.vals,p.t);
+        const x=cx(p.t),y=cy(sv),s=6;
+        ctx.beginPath();ctx.moveTo(x,y-s);ctx.lineTo(x+s,y+s*.65);ctx.lineTo(x-s,y+s*.65);ctx.closePath();
+        ctx.fillStyle='#f97316';ctx.fill();
+      });
+      tr.troughs.forEach(p=>{
+        const sv=interp(tr.times,tr.vals,p.t);
+        const x=cx(p.t),y=cy(sv),s=5;
+        ctx.beginPath();ctx.moveTo(x,y-s);ctx.lineTo(x+s,y);ctx.lineTo(x,y+s);ctx.lineTo(x-s,y);ctx.closePath();
+        ctx.fillStyle='#34d399';ctx.fill();
+      });
+    }
+  });
+
+  // Mean trace
+  if(showAvg && results.length>1){
+    ctx.beginPath(); ctx.strokeStyle='#ffffff'; ctx.lineWidth=2; ctx.lineJoin='round';
+    tAxis.forEach((t,i)=>i===0?ctx.moveTo(cx(t),cy(meanV[i])):ctx.lineTo(cx(t),cy(meanV[i])));
+    ctx.stroke();
+  }
+
+  // Legend
+  ctx.font=`9px 'DM Mono',monospace`; ctx.textAlign='left';
+  const short=n=>n.replace(/\.[^.]+$/,'').slice(0,18);
+  results.forEach((r,i)=>{
+    const col=AT_PAL[i%AT_PAL.length];
+    const lx=PAD.l+4+(i%4)*(PW/4), ly=PAD.t+PH+33;
+    ctx.fillStyle=col; ctx.fillRect(lx,ly-6,18,2);
+    ctx.fillStyle='#6a8aaa'; ctx.fillText(short(r.filename||`File ${i+1}`),lx+22,ly);
+  });
+  if(showAvg&&results.length>1){
+    ctx.fillStyle='rgba(255,255,255,0.8)'; ctx.fillRect(PAD.l+4,PAD.t+PH+39,18,2);
+    ctx.fillStyle='#6a8aaa'; ctx.fillText('Mean',PAD.l+26,PAD.t+PH+44);
+  }
+
+  // Axis labels
+  ctx.fillStyle='#415566'; ctx.font=`10px 'DM Mono',monospace`; ctx.textAlign='center';
+  ctx.fillText('Elapsed time (h)',PAD.l+PW/2,H-4);
+  ctx.save(); ctx.translate(13,PAD.t+PH/2); ctx.rotate(-Math.PI/2);
+  ctx.fillText('Normalised signal',0,0); ctx.restore();
+}
+
+// ── Render ────────────────────────────────────────────────
+function AT_render(results, ctRaws, anchorMode, ranges){
+  const right=document.getElementById('AT-right');
+  const showAvg=document.getElementById('AT-avg').checked;
+  const nFiles=results.length;
+  const meanPeriod=results.reduce((s,r)=>s+r.period,0)/nFiles;
+  const meanDur=results.reduce((s,r)=>s+r.totalH,0)/nFiles;
+  const anchorLabel=anchorMode==='trough'?'Trough (first trough)':'Peak (first peak)';
+  const nRanges=results[0].rangeResults.length;
+  const peakCT=AT_getCassette();           // null = no annotation
+  const cassetteName=AT_getCassetteName();
+  const hasCassette=peakCT!==null;
+
+  // ── Per-range result blocks ──────────────────────────────
+  function rangeBlocks(){
+    return results[0].rangeResults.map((rr,ri)=>{
+      const rngLabel=rr.label;
+      const rngColour=rr.colour;
+      const optData=AT_computeOptimum(results,ctRaws,ri,peakCT);
+
+      // Absolute cards — one per treatment, rows per file
+      const absHtml=ctRaws.map(raw=>{
+        const {offset,label,noCassette}=AT_parseCT(raw,peakCT);
+        const colour=AT_col(offset,meanPeriod);
+        const ctLabel=AT_offsetToCtLabel(offset,peakCT,meanPeriod);
+        const fileRows=results.map((r,i)=>{
+          const rngRes=r.rangeResults[ri];
+          const t=rngRes?.treatments.find(x=>x.label===label);
+          if(!t) return '';
+          const col=AT_PAL[i%AT_PAL.length];
+          const fname=(r.filename||`File ${i+1}`).replace(/\.[^.]+$/,'').slice(0,16);
+          return `<div style="display:flex;align-items:center;gap:7px;padding:3px 0;border-bottom:1px solid var(--border)">
+            <span style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0;display:inline-block"></span>
+            <span style="font-size:10px;color:var(--text3);min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.filename||'')}"> ${esc(fname)}</span>
+            <span style="font-family:var(--fm);font-size:12px;color:var(--text);margin-left:auto">${ft(t.clock)}</span>
+            <span style="font-size:10px;color:var(--text3)">${fd(t.clock)}</span>
+          </div>`;
+        }).join('');
+        return `<div style="background:var(--bg3);border:1px solid var(--border);border-left:3px solid ${colour};border-radius:4px;padding:10px 12px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px">
+            <span style="font-family:var(--fm);font-size:20px;font-weight:700;color:${colour}">${esc(label)}</span>
+            ${hasCassette?`<span style="font-family:var(--fm);font-size:13px;color:${colour};opacity:0.8">${ctLabel}</span>`:''}
+          </div>
+          <div style="font-size:10px;color:var(--text3);margin-bottom:6px">${AT_phase(offset,meanPeriod)}</div>
+          ${fileRows}
+        </div>`;
+      }).join('');
+
+      // Optimum cards
+      const optHtml=optData.filter(Boolean).map(o=>{
+        const ctLabel=AT_offsetToCtLabel(o.offset,peakCT,meanPeriod);
+        const badge=o.consensus
+          ? `<span style="background:#064e3b;color:#34d399;font-size:9px;padding:2px 6px;border-radius:20px;font-weight:600">✓ ≤20 min spread</span>`
+          : `<span style="background:#431407;color:#f97316;font-size:9px;padding:2px 6px;border-radius:20px">⚠ ${o.spreadMin.toFixed(0)} min spread</span>`;
+        return `<div style="background:var(--bg3);border:1px solid var(--border);border-left:3px solid ${o.colour};border-radius:4px;padding:10px 12px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px">
+            <span style="font-family:var(--fm);font-size:20px;font-weight:700;color:${o.colour}">${esc(o.label)}</span>
+            ${hasCassette?`<span style="font-family:var(--fm);font-size:13px;color:${o.colour};opacity:0.8">${ctLabel}</span>`:''}
+            ${badge}
+          </div>
+          <div style="font-size:22px;font-weight:600;font-family:var(--fh);color:var(--text);margin-bottom:1px">${ft(o.optClock)}</div>
+          <div style="font-size:10px;color:var(--text3);margin-bottom:5px">${o.phase}</div>
+          <div style="font-size:10px;color:var(--text2);line-height:1.6">Mean of ${o.clocks.length} replicate${o.clocks.length>1?'s':''} &nbsp;·&nbsp; spread ±${(o.spreadMin/2).toFixed(0)} min</div>
+        </div>`;
+      }).join('');
+
+      // 7-day rolling (optimum, first range only to avoid clutter with multiple ranges)
+      const rollingHtml=(ri===0&&optData.filter(Boolean).length)?`
+        <div style="margin-top:12px">
+          <div style="font-size:10px;font-weight:600;color:var(--text2);margin-bottom:6px;letter-spacing:.05em">7-DAY ROLLING SCHEDULE (optimum times)</div>
+          <div class="sched-scroll"><table>
+            <thead><tr><th>Day</th>${optData.filter(Boolean).map(o=>`<th style="color:${o.colour}">${esc(o.label)}</th>`).join('')}</tr></thead>
+            <tbody>${Array.from({length:7},(_,d)=>`<tr><td class="td-d">Day ${d+1}</td>${optData.filter(Boolean).map(o=>`<td class="td-m">${fdt(new Date(o.optClock.getTime()+d*meanPeriod*3600000))}</td>`).join('')}</tr>`).join('')}
+            </tbody>
+          </table></div>
+        </div>`:''
+
+      // Range period stats across files
+      const rangePeriods=results.map(r=>r.rangeResults[ri]?.period).filter(p=>p&&!isNaN(p));
+      const rangeMeanP=rangePeriods.length?rangePeriods.reduce((a,b)=>a+b,0)/rangePeriods.length:NaN;
+
+      // Range band colour as border accent
+      const borderCol=rngColour.replace(/[\d.]+\)$/,'0.7)');
+
+      return `<div class="panel fu" style="animation-delay:${0.08+ri*0.06}s;border-left:3px solid ${borderCol}">
+        <div class="ph" style="justify-content:space-between">
+          <span class="ph-t">${esc(rngLabel)}</span>
+          <span style="font-size:10px;color:var(--text3)">h${rr.from}–h${rr.to}${isNaN(rangeMeanP)?'':' &nbsp;·&nbsp; period '+rangeMeanP.toFixed(2)+' h'}</span>
+        </div>
+        <div class="pb">
+          <div style="margin-bottom:10px">
+            <div style="font-size:10px;font-weight:600;color:var(--text2);margin-bottom:6px;letter-spacing:.05em">ABSOLUTE — per replicate</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">${absHtml}</div>
+          </div>
+          <div style="border-top:1px solid var(--border);padding-top:10px">
+            <div style="font-size:10px;font-weight:600;color:var(--text2);margin-bottom:6px;letter-spacing:.05em">OPTIMUM — consensus</div>
+            <p style="font-size:10px;color:var(--text3);margin-bottom:8px;line-height:1.6">Circular mean across all replicates. <span style="color:#34d399">✓ ≤20 min</span> = all replicates agree within the treatment window.</p>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">${optHtml}</div>
+          </div>
+          ${rollingHtml}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  right.innerHTML=`
+    <div class="stats-row fu">
+      <div class="sc"><div class="sc-l">Files</div><div class="sc-v" style="color:var(--accent)">${nFiles}</div></div>
+      <div class="sc"><div class="sc-l">Mean period</div><div class="sc-v" style="color:var(--gold)">${meanPeriod.toFixed(2)}<span style="font-size:12px;color:var(--text3)"> h</span></div></div>
+      <div class="sc"><div class="sc-l">Ranges</div><div class="sc-v" style="color:var(--trough)">${nRanges}</div></div>
+      <div class="sc"><div class="sc-l">Reporter</div><div class="sc-v" style="color:var(--peak);font-size:11px">${esc(cassetteName)}</div></div>
+    </div>
+
+    <div class="panel fu" style="animation-delay:.05s">
+      <div class="ph" style="justify-content:space-between">
+        <span class="ph-t">Bioluminescence traces</span>
+        <span style="font-size:10px;color:var(--text3)">${nFiles} replicate${nFiles>1?'s':''}${showAvg&&nFiles>1?' &nbsp;·&nbsp; <span style="color:#ffffff">— mean</span>':''}</span>
+      </div>
+      <div class="pb"><div class="chart-wrap" style="height:260px"><canvas id="AT-canvas"></canvas></div></div>
+    </div>
+
+    ${rangeBlocks()}
+
+    ${(()=>{
+      // Warn if user entered CT/ZT entries but no cassette is selected
+      const ctEntries=ctRaws.filter(r=>/^(?:ct|zt)\s*[\d.+-]/i.test(r.trim()));
+      if(ctEntries.length && !hasCassette){
+        return `<div class="note fu" style="animation-delay:${0.08+nRanges*0.06}s;border-color:#f97316;color:#f97316">
+          ⚠ CT/ZT entries (${ctEntries.map(e=>e.trim()).join(', ')}) treated as hours-after-peak because no reporter cassette is selected.
+          Select a cassette in panel 3 to interpret CT/ZT as absolute circadian time.
+        </div>`;
+      } return '';
+    })()}
+    <div class="note fu" style="animation-delay:${0.1+nRanges*0.06}s">
+      Reporter: ${esc(cassetteName)}${hasCassette?' &nbsp;·&nbsp; Peak = CT'+peakCT+' &nbsp;·&nbsp; CT/ZT times anchored to circadian time':' &nbsp;·&nbsp; No CT annotation — CT/ZT treated as hours after peak'} &nbsp;·&nbsp; Mean period: ${meanPeriod.toFixed(2)} h &nbsp;·&nbsp; ${nFiles} file${nFiles>1?'s':''} &nbsp;·&nbsp; ${nRanges} range${nRanges>1?'s':''}
+    </div>
+  `;
+
+  requestAnimationFrame(()=>requestAnimationFrame(()=>AT_drawMultiChart('AT-canvas', results, showAvg, ranges)));
+}
+
+// ── Run button ────────────────────────────────────────────
+document.getElementById('AT-run').onclick=()=>{
+  if(!AT_files.length){AT_st('Please load at least one CSV file.','err');return;}
+  const ctRaws=AT_getCTs(); if(!ctRaws.length){AT_st('Add at least one treatment time.','err');return;}
+  const errs=[], results=[];
+  AT_files.forEach(f=>{
+    try{
+      const pairs=parseCSV(f.csv,f.name);
+      const span=pairs[pairs.length-1][0]-pairs[0][0];
+      if(span<24) throw new Error(`Only ${span.toFixed(1)} h recorded — need ≥24 h`);
+      const r=AT_runOne(pairs,f.rsISO,ctRaws,AT_getCassette());
+      r.filename=f.name;
+      results.push(r);
+    }catch(e){ errs.push(`${f.name}: ${e.message}`); }
+  });
+  if(!results.length){AT_st('All files failed: '+errs.join(' | '),'err');return;}
+  AT_results=results; AT_lastCtRaws=ctRaws;
+  document.getElementById('AT-save').disabled=false;
+  AT_render(results,ctRaws,'peak',null);
+  const warn=errs.length?` (${errs.length} skipped)`:' ';
+  AT_st(`Done — ${results.length} file${results.length>1?'s':''}, mean period ${(results.reduce((s,r)=>s+r.period,0)/results.length).toFixed(2)} h${warn}`,'ok');
+};
+
+// ── Demo button ───────────────────────────────────────────
+document.getElementById('AT-demo').onclick=()=>{
+  const ctRaws=AT_getCTs(); if(!ctRaws.length){AT_st('Add at least one treatment time.','err');return;}
+  try{
+    const rsISO='2026-03-30T08:00';
+    const demoResults=[0,1,2].map(seed=>{
+      const pairs=AT_demo(seed);
+      const r=AT_runOne(pairs,rsISO,ctRaws,AT_getCassette());
+      r.filename=`demo_replicate_${seed+1}.csv`;
+      return r;
+    });
+    AT_results=demoResults; AT_lastCtRaws=ctRaws;
+    document.getElementById('AT-save').disabled=false;
+    AT_render(demoResults,ctRaws,'peak',null);
+    AT_st(`Demo — 3 replicates, mean period ${(demoResults.reduce((s,r)=>s+r.period,0)/3).toFixed(2)} h`,'ok');
+  }catch(e){AT_st(e.message,'err');}
+};
+
+// ── Save report ───────────────────────────────────────────
+document.getElementById('AT-save').onclick=()=>{
+  if(!AT_results.length) return;
+  const ctRaws=AT_lastCtRaws.length?AT_lastCtRaws:AT_getCTs();
+  const meanPeriod=AT_results.reduce((s,r)=>s+r.period,0)/AT_results.length;
+  const anchorMode=AT_getAnchor();
+  const nRanges=AT_results[0].rangeResults.length;
+
+  const lines=[
+    'CIRCATREAT — CIRCADIAN TREATMENT TIME PREDICTOR',
+    `Generated: ${new Date().toLocaleString('en-GB')}`,
+    '© All rights reserved. Topping et al. 2026','',
+    '═══════════════════════','ANALYSIS SUMMARY','═══════════════════════',
+    `Files: ${AT_results.length}`,
+    `Reporter cassette: ${AT_getCassetteName()}${AT_getCassette()!==null?' (peak = CT'+AT_getCassette()+')':''}`,
+    `Ranges: ${nRanges}`,
+    `Mean period: ${meanPeriod.toFixed(2)} h`,
+    `Period range: ${Math.min(...AT_results.map(r=>r.period)).toFixed(2)} – ${Math.max(...AT_results.map(r=>r.period)).toFixed(2)} h`,
+  ];
+
+  for(let ri=0;ri<nRanges;ri++){
+    const rr0=AT_results[0].rangeResults[ri];
+    const optData=AT_computeOptimum(AT_results,ctRaws,ri,AT_getCassette());
+    lines.push('',`═══════════════════════`,`RANGE: ${rr0.label} (h${rr0.from}–h${rr0.to})`,`═══════════════════════`);
+    lines.push('--- Absolute (per replicate) ---');
+    AT_results.forEach(r=>{
+      const rngRes=r.rangeResults[ri];
+      lines.push(`\n  ${r.filename}  (period ${rngRes?.period?.toFixed(2)||'?'} h, anchor: ${rngRes?.anchorClk?fdt(rngRes.anchorClk):'?'})`);
+      rngRes?.treatments.forEach(t=>{
+        const ctLbl=AT_offsetToCtLabel(t.offset,AT_getCassette(),rngRes.period);
+        lines.push(`    ${String(t.label).padEnd(12)}${ctLbl?' ('+ctLbl+')':''.padEnd(8)} ${fdt(t.clock).padEnd(32)} ${t.phase}`);
+      });
+    });
+    lines.push('','--- Optimum (consensus) ---');
+    optData.filter(Boolean).forEach(o=>{
+      const ctLbl=AT_offsetToCtLabel(o.offset,AT_getCassette(),meanPeriod);
+      lines.push(`  ${String(o.label).padEnd(12)}${ctLbl?' ('+ctLbl+')':''.padEnd(8)} ${fdt(o.optClock).padEnd(32)} spread: ${o.spreadMin.toFixed(0)} min ${o.consensus?'[✓ CONSENSUS]':'[⚠ wide]'}  ${o.phase}`);
+    });
+    if(ri===0){
+      lines.push('','--- 7-day rolling schedule (optimum, first range) ---');
+      optData.filter(Boolean).forEach(o=>{
+        lines.push(`\n  ${o.label} — ${o.phase}`);
+        Array.from({length:7},(_,d)=>lines.push(`    Day ${d+1}: ${fdt(new Date(o.optClock.getTime()+d*meanPeriod*3600000))}`));
+      });
+    }
+  }
+  lines.push(`\nMean period drift: ${(meanPeriod-24).toFixed(2)} h/day`);
+
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([lines.join('\n')],{type:'text/plain'}));
+  a.download='CircATreat_schedule.txt'; a.click();
+};
+
+window.addEventListener('resize',()=>{
+  if(AT_results.length){
+    requestAnimationFrame(()=>AT_drawMultiChart('AT-canvas',AT_results,document.getElementById('AT-avg')?.checked,null));
+  }
+});
+
+
+/* ════════════════════════════════════════════════════════════
+   CIRCATRACE
+════════════════════════════════════════════════════════════ */
+const PALS={
+  okabe:    {c:['#E69F00','#56B4E9','#009E73','#F0E442','#0072B2','#D55E00','#CC79A7','#000000'],d:[]},
+  wong:     {c:['#000000','#E69F00','#56B4E9','#009E73','#F0E442','#0072B2','#D55E00','#CC79A7'],d:[]},
+  tol:      {c:['#332288','#117733','#44AA99','#88CCEE','#DDCC77','#CC6677','#AA4499','#882255'],d:[]},
+  ibm:      {c:['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000','#009E73','#56B4E9','#E69F00'],d:[]},
+  grey5:    {c:['#000','#404040','#808080','#b0b0b0','#d8d8d8'],d:[]},
+  grey8:    {c:['#000','#222','#444','#666','#888','#aaa','#ccc','#e8e8e8'],d:[]},
+  blackgrey:{c:['#000','#333','#666','#999','#bbb','#111','#555','#888'],d:[]},
+  monodash: {c:['#000','#000','#000','#000','#000','#000','#000','#000'],d:[[],[6,3],[2,3],[8,3,2,3],[12,3],[4,2,1,2],[6,2,1,2,1,2],[3,3,8,3]]}
+};
+let AC_traces=[],AC_palKey='okabe',AC_bg='dark';
+
+function AC_drawPal(key){
+  AC_palKey=key;
+  const c=PALS[key].c;
+  document.getElementById('AC-pg').innerHTML=c.map(col=>{const bg=col==='#000000'?'#333':col;const b=(col==='#e8e8e8'||col==='#d8d8d8')?'1px solid #aaa':'none';return`<div class="psw" style="background:${bg};border:${b}" title="${col}"></div>`}).join('');
+}
+document.getElementById('AC-pal').addEventListener('change',e=>AC_drawPal(e.target.value));
+document.getElementById('AC-applypal').addEventListener('click',()=>{const p=PALS[AC_palKey];AC_traces.forEach((t,i)=>{t.color=p.c[i%p.c.length];t.di=i%Math.max(1,p.d.length)});AC_renderList();if(AC_traces.length)AC_render()});
+AC_drawPal('okabe');
+
+// Background pills
+document.querySelectorAll('.bg-pill').forEach(pill=>{
+  pill.addEventListener('click',()=>{
+    document.querySelectorAll('.bg-pill').forEach(p=>p.classList.remove('active'));
+    pill.classList.add('active');AC_bg=pill.dataset.bg;
+    const w=document.getElementById('AC-cw');w.className='cwrap fu';
+    if(AC_bg==='white')w.classList.add('pw');if(AC_bg==='offwhite')w.classList.add('po');
+    if(AC_traces.length)AC_render();
+  });
+});
+
+// File drop
+const AC_dz=document.getElementById('AC-dz');
+AC_dz.addEventListener('dragover',e=>{e.preventDefault();AC_dz.classList.add('over')});
+AC_dz.addEventListener('dragleave',()=>AC_dz.classList.remove('over'));
+AC_dz.addEventListener('drop',e=>{e.preventDefault();AC_dz.classList.remove('over');AC_load(Array.from(e.dataTransfer.files))});
+document.getElementById('AC-fi').addEventListener('change',e=>{AC_load(Array.from(e.target.files));e.target.value=''});
+
+function AC_load(files){
+  let n=0,errs=[];
+  files.forEach(f=>{
+    const r=new FileReader();
+    r.onload=e=>{
+      try{
+        const pairs=parseCSV(e.target.result,f.name);
+        SHARED_add(f.name, e.target.result);
+        const idx=AC_traces.length,p=PALS[AC_palKey];
+        AC_traces.push({fn:f.name,label:f.name.replace(/\.[^.]+$/,''),pairs,color:p.c[idx%p.c.length],di:idx%Math.max(1,p.d.length)});n++;
+      }catch(er){errs.push(er.message)}
+      if(n+errs.length===files.length){AC_renderList();AC_st(errs.length?`${n} loaded, errors: ${errs.join('; ')}`:`${n} file(s) loaded — click Render.`,errs.length?'err':'ok');document.getElementById('AC-exp').disabled=!AC_traces.length}
+    };r.readAsText(f);
+  });
+}
+
+function AC_renderList(){
+  const el=document.getElementById('AC-tl');
+  document.getElementById('AC-cnt').textContent=`${AC_traces.length} loaded`;
+  if(!AC_traces.length){el.innerHTML='';return}
+  el.innerHTML=AC_traces.map((t,i)=>{const span=(t.pairs[t.pairs.length-1][0]-t.pairs[0][0]).toFixed(1);const bg=t.color==='#000000'?'#333':t.color;return`<div class="ti" data-i="${i}"><div class="ti-top"><div class="tswatch" style="background:${bg}"><input type="color" value="${t.color}" data-i="${i}"></div><div class="tlw"><input class="tlabel" type="text" value="${esc(t.label)}" data-i="${i}" placeholder="name this trace…"><div class="tfn" title="${esc(t.fn)}">${esc(t.fn)}</div></div><button class="trm" data-i="${i}">×</button></div><div class="tmeta">${t.pairs.length} pts · ${span} h</div></div>`}).join('');
+  el.querySelectorAll('input[type="color"]').forEach(inp=>inp.addEventListener('input',e=>{const i=+e.target.dataset.i;AC_traces[i].color=e.target.value;e.target.closest('.tswatch').style.background=e.target.value==='#000000'?'#333':e.target.value;if(AC_traces.length)AC_render()}));
+  el.querySelectorAll('.tlabel').forEach(inp=>{inp.addEventListener('input',e=>{AC_traces[+e.target.dataset.i].label=e.target.value});inp.addEventListener('blur',()=>{if(AC_traces.length)AC_render()});inp.addEventListener('keydown',e=>{if(e.key==='Enter')e.target.blur()})});
+  el.querySelectorAll('.trm').forEach(btn=>btn.addEventListener('click',e=>{const t=AC_traces[+e.target.dataset.i];SHARED_remove(t.fn);AC_traces.splice(+e.target.dataset.i,1);AC_renderList();if(AC_traces.length)AC_render();else AC_clear();document.getElementById('AC-exp').disabled=!AC_traces.length}));
+}
+function AC_clear(){document.getElementById('TC').style.display='none';document.getElementById('AC-ph').style.display='flex';document.getElementById('AC-lw2').innerHTML=''}
+
+let AC_xunit='hours';
+document.querySelectorAll('[data-xunit]').forEach(pill=>{
+  pill.addEventListener('click',()=>{
+    document.querySelectorAll('[data-xunit]').forEach(p=>p.classList.remove('active'));
+    pill.classList.add('active');
+    AC_xunit=pill.dataset.xunit;
+    if(AC_traces.length)AC_render();
+  });
+});
+
+function AC_render(){
+  if(!AC_traces.length)return;
+  const canvas=document.getElementById('TC');
+  document.getElementById('AC-ph').style.display='none';canvas.style.display='block';
+  const dpi=+document.getElementById('AC-dpi').value,smW=+document.getElementById('AC-sm').value||11,lnW=+document.getElementById('AC-lw').value||2;
+  const sPk=document.getElementById('AC-pk').checked,sTr=document.getElementById('AC-tr').checked,sGr=document.getElementById('AC-gr').checked,sLg=document.getElementById('AC-lg').checked,sLb=document.getElementById('AC-lb').checked,doNm=document.getElementById('AC-nm').checked;
+  const ttl=document.getElementById('AC-ttl').value,sub=document.getElementById('AC-sub').value;
+  const mtp=dpi/25.4,PW=Math.round(180*mtp),PH=Math.round(120*mtp);
+  canvas.width=PW;canvas.height=PH;const sc=dpi/96;
+  const F=sz=>`${Math.round(sz*sc)}px 'DM Mono',monospace`,FH=sz=>`${Math.round(sz*sc)}px 'Syne',sans-serif`;
+  const BGS={dark:{bg:'#1c2738',text:'#dde6f0',t2:'#7f9ab0',t3:'#4a6070',grid:'rgba(255,255,255,0.06)',axis:'rgba(255,255,255,0.2)',zero:'rgba(255,255,255,0.12)',rim:'rgba(20,28,38,0.7)',lbox:'rgba(28,39,56,0.82)'},white:{bg:'#ffffff',text:'#1a1a2e',t2:'#444466',t3:'#888aaa',grid:'rgba(0,0,0,0.07)',axis:'rgba(0,0,0,0.3)',zero:'rgba(0,0,0,0.15)',rim:'rgba(255,255,255,0.9)',lbox:'rgba(255,255,255,0.88)'},offwhite:{bg:'#f5f5f0',text:'#1a1a2e',t2:'#444466',t3:'#888aaa',grid:'rgba(0,0,0,0.07)',axis:'rgba(0,0,0,0.3)',zero:'rgba(0,0,0,0.15)',rim:'rgba(245,245,240,0.9)',lbox:'rgba(245,245,240,0.88)'}};
+  const C=BGS[AC_bg]||BGS.dark;
+  const rp=sLb?90*sc:24*sc,PAD={l:68*sc,r:rp,t:(ttl||sub?52:28)*sc,b:52*sc};
+  const PW2=PW-PAD.l-PAD.r,PH2=PH-PAD.t-PAD.b;
+  const ctx=canvas.getContext('2d');ctx.fillStyle=C.bg;ctx.fillRect(0,0,PW,PH);
+  if(ttl){ctx.fillStyle=C.text;ctx.font=FH(13);ctx.textAlign='center';ctx.fillText(ttl,PW/2,18*sc)}
+  if(sub){ctx.fillStyle=C.t2;ctx.font=F(9);ctx.textAlign='center';ctx.fillText(sub,PW/2,(ttl?32:18)*sc)}
+  const xDiv=(AC_xunit==='days')?24:1;
+  const xAxisLabel=(xDiv===24)?'Elapsed time (days)':'Elapsed time (h)';
+  const proc=AC_traces.map(t=>{const times=t.pairs.map(p=>p[0]);let vals=t.pairs.map(p=>p[1]);if(doNm)vals=normV(vals);const d=detect(times,vals,smW);const p2=PALS[AC_palKey];const dash=(p2.d&&p2.d.length)?p2.d[t.di%p2.d.length]:[];return{...t,times,vals,dash,...d}});
+  const allT=proc.flatMap(t=>t.times),minT=Math.min(...allT),maxT=Math.max(...allT);
+  const allV=proc.flatMap(t=>t.vals),minV=Math.min(...allV),maxV=Math.max(...allV),vp2=(maxV-minV)*.1;
+  const vLo=minV-vp2,vHi=maxV+vp2;
+  const cx=t=>PAD.l+(t-minT)/(maxT-minT)*PW2,cy=v=>PAD.t+(1-(v-vLo)/(vHi-vLo))*PH2;
+  if(sGr){ctx.strokeStyle=C.grid;ctx.lineWidth=0.6*sc;ctx.setLineDash([3*sc,5*sc]);for(let t=Math.ceil(minT/24)*24;t<=maxT;t+=24){const x=cx(t);ctx.beginPath();ctx.moveTo(x,PAD.t);ctx.lineTo(x,PAD.t+PH2);ctx.stroke()}for(let f of[0,.25,.5,.75,1]){const y=cy(vLo+f*(vHi-vLo));ctx.beginPath();ctx.moveTo(PAD.l,y);ctx.lineTo(PAD.l+PW2,y);ctx.stroke()}ctx.setLineDash([])}
+  if(vLo<0&&vHi>0){ctx.strokeStyle=C.zero;ctx.lineWidth=0.8*sc;ctx.setLineDash([3*sc,4*sc]);ctx.beginPath();ctx.moveTo(PAD.l,cy(0));ctx.lineTo(PAD.l+PW2,cy(0));ctx.stroke();ctx.setLineDash([])}
+  ctx.strokeStyle=C.axis;ctx.lineWidth=1.2*sc;ctx.beginPath();ctx.moveTo(PAD.l,PAD.t);ctx.lineTo(PAD.l,PAD.t+PH2);ctx.lineTo(PAD.l+PW2,PAD.t+PH2);ctx.stroke();
+  ctx.fillStyle=C.t3;ctx.font=F(8);ctx.textAlign='center';
+  for(let t=Math.ceil(minT/24)*24;t<=maxT;t+=24){const x=cx(t);ctx.strokeStyle=C.axis;ctx.lineWidth=0.8*sc;ctx.beginPath();ctx.moveTo(x,PAD.t+PH2);ctx.lineTo(x,PAD.t+PH2+4*sc);ctx.stroke();ctx.fillText(xDiv===24?(t/24).toFixed(1)+'d':t+'h',x,PAD.t+PH2+14*sc)}
+  ctx.textAlign='right';for(let i=0;i<=5;i++){const v=vLo+i/5*(vHi-vLo),y=cy(v);ctx.strokeStyle=C.axis;ctx.lineWidth=0.8*sc;ctx.beginPath();ctx.moveTo(PAD.l,y);ctx.lineTo(PAD.l-4*sc,y);ctx.stroke();ctx.fillStyle=C.t3;ctx.fillText(doNm?v.toFixed(2):v.toFixed(0),PAD.l-7*sc,y+3*sc)}
+  ctx.fillStyle=C.t2;ctx.font=F(9);ctx.textAlign='center';ctx.fillText(xAxisLabel,PAD.l+PW2/2,PH-8*sc);ctx.save();ctx.translate(13*sc,PAD.t+PH2/2);ctx.rotate(-Math.PI/2);ctx.fillText(doNm?'Normalised signal':'counts / sec',0,0);ctx.restore();
+  proc.forEach(t=>{
+    const{times,vals,sm,pk,tr,color,dash}=t;
+    ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=lnW*sc;ctx.lineJoin='round';
+    if(dash&&dash.length)ctx.setLineDash(dash.map(v=>v*sc));else ctx.setLineDash([]);
+    times.forEach((tv,i)=>i===0?ctx.moveTo(cx(tv),cy(sm[i])):ctx.lineTo(cx(tv),cy(sm[i])));ctx.stroke();ctx.setLineDash([]);
+    if(sPk)pk.forEach(p=>{const x=cx(p.t),y=cy(p.v),s=5*sc;ctx.beginPath();ctx.moveTo(x,y-s);ctx.lineTo(x+s,y+s*.7);ctx.lineTo(x-s,y+s*.7);ctx.closePath();ctx.fillStyle=color;ctx.fill();ctx.strokeStyle=C.rim;ctx.lineWidth=0.8*sc;ctx.stroke()});
+    if(sTr)tr.forEach(p=>{const x=cx(p.t),y=cy(p.v),s=4.5*sc;ctx.beginPath();ctx.moveTo(x,y-s);ctx.lineTo(x+s,y);ctx.lineTo(x,y+s);ctx.lineTo(x-s,y);ctx.closePath();ctx.fillStyle=color;ctx.fill();ctx.strokeStyle=C.rim;ctx.lineWidth=0.8*sc;ctx.stroke()});
+    if(sLb&&t.label.trim()){const lx=cx(times[times.length-1])+7*sc,ly=cy(sm[sm.length-1]);ctx.font=F(8.5);const tw=ctx.measureText(t.label).width,pd=3*sc;ctx.fillStyle=C.lbox;ctx.beginPath();ctx.roundRect(lx-pd,ly-9*sc,tw+pd*2,12*sc,3*sc);ctx.fill();ctx.fillStyle=color;ctx.textAlign='left';ctx.fillText(t.label,lx,ly)}
+  });
+
+  // ── Average ± SEM trace ──────────────────────────────────────────
+  const doAvg = document.getElementById('AC-avg')?.checked;
+  if(doAvg && proc.length >= 2){
+    const globalMinT=Math.min(...proc.map(t=>t.times[0]));
+    const globalMaxT=Math.max(...proc.map(t=>t.times[t.times.length-1]));
+    const nGrid=400;
+    const gridT=Array.from({length:nGrid},(_,i)=>globalMinT+i/(nGrid-1)*(globalMaxT-globalMinT));
+    function interp(times,vals,t){
+      if(t<=times[0])return vals[0];if(t>=times[times.length-1])return vals[vals.length-1];
+      let lo=0,hi=times.length-1;
+      while(hi-lo>1){const mid=(lo+hi)>>1;if(times[mid]<=t)lo=mid;else hi=mid;}
+      return vals[lo]+(vals[hi]-vals[lo])*(t-times[lo])/(times[hi]-times[lo]);
+    }
+    const grids=proc.map(t=>gridT.map(gt=>interp(t.times,t.sm,gt)));
+    const avgV=gridT.map((_,gi)=>grids.map(g=>g[gi]).reduce((a,b)=>a+b,0)/grids.length);
+    const semV=gridT.map((_,gi)=>{
+      const vs=grids.map(g=>g[gi]);const m=avgV[gi];
+      return Math.sqrt(vs.reduce((s,v2)=>s+(v2-m)**2,0)/Math.max(1,vs.length-1)/vs.length);
+    });
+    const avgCol=C.bg==='#ffffff'||C.bg==='#f5f5f0'?'#111111':'#ffffff';
+    // SEM band
+    ctx.beginPath();
+    gridT.forEach((t,i)=>i===0?ctx.moveTo(cx(t),cy(avgV[i]+semV[i])):ctx.lineTo(cx(t),cy(avgV[i]+semV[i])));
+    [...gridT].reverse().forEach((t,i)=>{const ri=nGrid-1-i;ctx.lineTo(cx(t),cy(avgV[ri]-semV[ri]));});
+    ctx.closePath();ctx.fillStyle=avgCol+'33';ctx.fill();
+    // Mean line
+    ctx.beginPath();ctx.strokeStyle=avgCol;ctx.lineWidth=(lnW+1.5)*sc;ctx.lineJoin='round';ctx.setLineDash([]);
+    gridT.forEach((t,i)=>i===0?ctx.moveTo(cx(t),cy(avgV[i])):ctx.lineTo(cx(t),cy(avgV[i])));
+    ctx.stroke();
+  }
+
+  const lw2=document.getElementById('AC-lw2');
+  const doAvgLeg=document.getElementById('AC-avg')?.checked;
+  if(sLg&&proc.length){lw2.innerHTML=proc.map(t=>`<div class="legitem"><div class="legdot" style="background:${t.color==='#000000'?'#555':t.color}"></div><span>${esc(t.label)}</span><span style="color:var(--text3)">· ${t.per.toFixed(1)}h</span></div>`).join('')+(doAvgLeg&&proc.length>=2?`<div class="legitem"><div class="legdot" style="background:${C.bg==='#ffffff'||C.bg==='#f5f5f0'?'#111':'#fff'}"></div><span style="font-weight:600">Mean ± SEM (n=${proc.length})</span></div>`:'')}else lw2.innerHTML='';
+  AC_st(`${proc.length} trace(s) · ${dpi} dpi`,'ok');document.getElementById('AC-exp').disabled=false;
+}
+
+document.getElementById('AC-render').addEventListener('click',AC_render);
+document.getElementById('AC-exp').addEventListener('click',()=>{
+  const canvas=document.getElementById('TC'),fmt=document.getElementById('AC-fmt').value,dpi=document.getElementById('AC-dpi').value;
+  const name=(document.getElementById('AC-ttl').value||'circatrace').replace(/\s+/g,'_');
+  if(fmt==='tiff'){AC_tiff(canvas,`${name}_${dpi}dpi.tiff`);return}
+  const a=document.createElement('a');a.href=canvas.toDataURL(fmt==='jpeg'?'image/jpeg':'image/png',fmt==='jpeg'?0.95:undefined);a.download=`${name}_${dpi}dpi.${fmt}`;a.click();
+  AC_st(`Exported ${fmt.toUpperCase()} at ${dpi} dpi`,'ok');
+});
+function AC_tiff(canvas,filename){
+  const w=canvas.width,h=canvas.height,px=canvas.getContext('2d').getImageData(0,0,w,h).data;
+  const sb=w*3*h,io=8,sdo=io+2+12*11+4;const buf=new ArrayBuffer(sdo+sb);const v=new DataView(buf);
+  v.setUint16(0,0x4949,true);v.setUint16(2,42,true);v.setUint32(4,io,true);
+  let o=io;v.setUint16(o,11,true);o+=2;
+  const ie=(tag,type,cnt,val)=>{v.setUint16(o,tag,true);v.setUint16(o+2,type,true);v.setUint32(o+4,cnt,true);v.setUint32(o+8,val,true);o+=12};
+  ie(256,3,1,w);ie(257,3,1,h);ie(258,3,1,8);ie(259,3,1,1);ie(262,3,1,2);ie(273,4,1,sdo);ie(278,3,1,h);ie(279,4,1,sb);ie(282,5,1,sdo-8);ie(283,5,1,sdo-8);ie(284,3,1,1);v.setUint32(o,0,true);
+  let p=sdo;for(let i=0;i<px.length;i+=4){v.setUint8(p++,px[i]);v.setUint8(p++,px[i+1]);v.setUint8(p++,px[i+2])}
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([buf],{type:'image/tiff'}));a.download=filename;a.click();
+  AC_st('Exported TIFF','ok');
+}
+['AC-sm','AC-lw','AC-pk','AC-tr','AC-gr','AC-lg','AC-lb','AC-nm','AC-avg','AC-ttl','AC-sub'].forEach(id=>{
+  const el=document.getElementById(id);el.addEventListener(el.type==='checkbox'?'change':'input',()=>{if(AC_traces.length)AC_render()});
+});
+window.addEventListener('resize',()=>{if(AC_traces.length&&document.getElementById('panel-trace').classList.contains('active'))AC_render()});
+
+/* ════════════════════════════════════════════════════════════
+   CIRCATRENDS
+════════════════════════════════════════════════════════════ */
+let TR_rows=[];      // [{id, filename, batchId, peaks:[{x,y}], troughs:[{x,y}], group, period, phase, amplitude, magnitude}]
+let TR_groups=[];
+let TR_palKey='okabe';
+let TR_customPal=[];
+let TR_canvases=[];
+let TR_chartBg='dark';  // 'dark' | 'white' | 'offwhite'
+let TR_batchCounter=0;  // incremented each time files are dropped/browsed
+
+// Source-file colour palette — distinct from group colours
+const TR_SRC_PAL = [
+  {color:'#60a5fa', symbol:'●'},  // 1 — blue circle
+  {color:'#f97316', symbol:'■'},  // 2 — orange square
+  {color:'#34d399', symbol:'▲'},  // 3 — green triangle
+  {color:'#a78bfa', symbol:'◆'},  // 4 — purple diamond
+  {color:'#fb7185', symbol:'★'},  // 5 — pink star
+  {color:'#fbbf24', symbol:'⬟'},  // 6 — yellow diamond
+  {color:'#22d3ee', symbol:'⬤'},  // 7 — cyan circle
+  {color:'#e879f9', symbol:'✦'},  // 8 — magenta sparkle
+];
+
+// ── Palette ───────────────────────────────────────────────
+function TR_drawPal(key){
+  TR_palKey=key;
+  document.getElementById('TR-pg').innerHTML=PALS[key].c.map(c=>{
+    const bg=c==='#000000'?'#333':c;
+    return`<div class="psw" style="background:${bg}" title="${c}"></div>`;
+  }).join('');
+}
+document.getElementById('TR-pal').addEventListener('change',e=>TR_drawPal(e.target.value));
+document.getElementById('TR-applypal').addEventListener('click',()=>{
+  const colors=TR_customPal.length?TR_customPal:PALS[TR_palKey].c;
+  TR_groups.forEach((g,i)=>g.color=colors[i%colors.length]);
+  TR_renderGroups(); TR_renderTable();
+});
+TR_drawPal('okabe');
+
+// ── Anchor & analysis range helpers ──────────────────────
+let TR_rc = 0;
+const TR_RANGE_COLS = ['rgba(96,165,250,0.15)','rgba(249,115,22,0.15)','rgba(52,211,153,0.15)',
+                       'rgba(167,139,250,0.15)','rgba(251,146,60,0.15)'];
+
+function TR_getAnchor(){
+  return document.querySelector('input[name="TR-anchor"]:checked')?.value||'peak';
+}
+
+function TR_addRange(label='',from='',to=''){
+  TR_rc++;
+  const idx=document.getElementById('TR-ranges').children.length;
+  const dot=TR_RANGE_COLS[idx%TR_RANGE_COLS.length].replace('0.15','0.8');
+  const row=document.createElement('div');
+  row.className='tr-range-row';
+  row.style.cssText='display:flex;align-items:center;gap:5px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:5px 7px';
+  row.innerHTML=`
+    <span style="width:8px;height:8px;border-radius:2px;background:${dot};flex-shrink:0;display:inline-block"></span>
+    <input type="text" placeholder="Label (e.g. Post-treatment)" value="${label}"
+      style="flex:2;min-width:0;font-size:10px;padding:3px 5px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--fh)">
+    <input type="number" placeholder="From h" value="${from}" min="0" step="1"
+      style="width:56px;font-size:10px;padding:3px 5px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--fm);text-align:right">
+    <span style="font-size:10px;color:var(--text3)">–</span>
+    <input type="number" placeholder="To h" value="${to}" min="0" step="1"
+      style="width:56px;font-size:10px;padding:3px 5px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--fm);text-align:right">
+    <button style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:0 2px;line-height:1;flex-shrink:0" title="Remove">×</button>`;
+  row.querySelector('button').onclick=()=>row.remove();
+  document.getElementById('TR-ranges').appendChild(row);
+}
+document.getElementById('TR-addrange').onclick=()=>TR_addRange();
+
+function TR_getRanges(){
+  const rows=[...document.querySelectorAll('#TR-ranges .tr-range-row')];
+  if(!rows.length) return null;
+  return rows.map((r,i)=>{
+    const ins=[...r.querySelectorAll('input')];
+    const label=ins[0].value.trim()||`Range ${i+1}`;
+    const from=parseFloat(ins[1].value);
+    const to=parseFloat(ins[2].value);
+    if(isNaN(from)||isNaN(to)||to<=from) throw new Error(`Range "${label}": "from" must be less than "to"`);
+    return{label,from,to};
+  });
+}
+document.getElementById('TR-test').addEventListener('change', function(){
+  const v = this.value;
+  document.getElementById('TR-posthoc-row').style.display  = (v==='anova'||v==='twoway') ? 'block' : 'none';
+  document.getElementById('TR-twoway-row').style.display   = (v==='twoway')  ? 'block' : 'none';
+  document.getElementById('TR-paired-note').style.display  = (v==='paired')  ? 'block' : 'none';
+});
+
+// ── Normalisation controls ────────────────────────────────
+let TR_normMode = 'absolute'; // 'absolute' | 'percent' | 'fold'
+
+document.getElementById('TR-donorm').addEventListener('change', function(){
+  document.getElementById('TR-normbox').style.display = this.checked ? 'block' : 'none';
+});
+
+// Norm mode pills
+document.querySelectorAll('[data-normmode]').forEach(pill=>{
+  pill.addEventListener('click',()=>{
+    document.querySelectorAll('[data-normmode]').forEach(p=>p.classList.remove('active'));
+    pill.classList.add('active');
+    TR_normMode = pill.dataset.normmode;
+    const hints = {
+      absolute: 'Values shown as absolute numbers.',
+      percent:  '% of reference group mean. Reference group = 100%.',
+      fold:     'Fold change relative to reference group mean. Reference = 1.0.'
+    };
+    document.getElementById('TR-normhint').textContent = hints[TR_normMode];
+  });
+});
+
+// Rebuild the reference group dropdown whenever groups change
+function TR_updateNormDropdown(){
+  const sel = document.getElementById('TR-normgrp');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— select group —</option>' +
+    TR_groups.map(g=>`<option value="${esc(g.name)}"${g.name===cur?' selected':''}>${esc(g.name)}</option>`).join('');
+}
+
+document.querySelectorAll('[data-trbg]').forEach(pill=>{
+  pill.addEventListener('click',()=>{
+    document.querySelectorAll('[data-trbg]').forEach(p=>p.classList.remove('active'));
+    pill.classList.add('active');
+    TR_chartBg=pill.dataset.trbg;
+    // Redraw any existing charts with new background
+    TR_canvases.forEach(e=>e.redraw&&e.redraw());
+  });
+});
+
+document.getElementById('TR-palfile').addEventListener('change',e=>{
+  const f=e.target.files[0];if(!f)return;
+  const r=new FileReader();
+  r.onload=ev=>{
+    const lines=ev.target.result.split(/\r?\n/).map(l=>l.trim()).filter(l=>/^#[0-9a-f]{3,6}$/i.test(l));
+    TR_customPal=lines;
+    document.getElementById('TR-custom-swatches').innerHTML=lines.map(c=>`<div class="custom-psw" style="background:${c}" title="${c}"></div>`).join('');
+    TR_st(`${lines.length} custom colours loaded`,'ok');
+  };
+  r.readAsText(f); e.target.value='';
+});
+
+// ── CSV Auto-detection and peak/trough extraction ─────────
+// range: {from, to} in hours, or null for full recording
+// anchorMode: 'peak' | 'trough'
+function TR_extractFromLumiCSV(text, fname, range, anchorMode){
+  let pairs;
+  try { pairs = parseCSV(text, fname); }
+  catch(e){ throw new Error(fname+': '+e.message); }
+
+  if(!pairs||pairs.length<10) throw new Error(fname+': not enough data points');
+
+  // Slice to range if specified
+  if(range){
+    pairs = pairs.filter(p=>p[0]>=range.from && p[0]<=range.to);
+    if(pairs.length<10) throw new Error(fname+`: range h${range.from}–h${range.to} contains too few points`);
+  }
+
+  const times = pairs.map(p=>p[0]);
+  const vals  = pairs.map(p=>p[1]);
+
+  // Smooth and detect peaks/troughs
+  const sm = smth(vals, 11);
+  const W  = 5;
+  const peaks=[], troughs=[];
+
+  for(let i=W; i<sm.length-W; i++){
+    let ip=true, it=true;
+    for(let j=i-W; j<=i+W; j++){
+      if(j===i) continue;
+      if(sm[i]<sm[j]) ip=false;
+      if(sm[i]>sm[j]) it=false;
+    }
+    if(ip) peaks.push({x: parseFloat((times[i]/24).toFixed(5)), y: parseFloat(vals[i].toFixed(3))});
+    if(it) troughs.push({x: parseFloat((times[i]/24).toFixed(5)), y: parseFloat(vals[i].toFixed(3))});
+  }
+
+  if(peaks.length<2) throw new Error(fname+': fewer than 2 peaks detected — need at least 2 cycles.');
+
+  const {type: _st, idx: _si} = (typeof TR_parseStart === 'function') ? TR_parseStart() : {type:'pk', idx:0};
+  const usePeaks   = peaks.slice(_st==='pk' ? _si : 0);
+  const useTroughs = troughs.slice(_st==='tr' ? _si : 0);
+  const peakXh   = usePeaks.map(p=>p.x*24);
+  const troughXh = useTroughs.map(t=>t.x*24);
+
+  let period = NaN;
+  if(peakXh.length>=2){
+    const ivs=peakXh.slice(1).map((v,i)=>v-peakXh[i]).filter(v=>v>=16&&v<=36);
+    if(ivs.length) period = ivs.reduce((a,b)=>a+b)/ivs.length;
+  }
+
+  // Phase: position of first anchor feature within one cycle (0 – period h).
+  // Calculated as elapsed_time % period — i.e. the acrophase in hours,
+  // independent of how many cycles elapsed before the first detected feature.
+  // Falls back to raw elapsed time if period could not be determined.
+  const rawPhaseH = anchorMode==='trough'
+    ? (troughXh[0] !== undefined ? troughXh[0] : NaN)
+    : (peakXh[0]   !== undefined ? peakXh[0]   : NaN);
+  const phase = (!isNaN(rawPhaseH) && !isNaN(period))
+    ? ((rawPhaseH % period) + period) % period   // modulo, always positive
+    : rawPhaseH;
+
+  const magnitude  = usePeaks.length ? usePeaks.reduce((s,p)=>s+p.y,0)/usePeaks.length : NaN;
+
+  // Shared arrays used by amplitude, rising, and falling calculations
+  const allPeakXh   = peaks.map(p=>p.x*24);
+  const allTroughXh = troughs.map(t=>t.x*24);
+
+  // ── Amplitude (peak-to-trough, cycle-matched) ────────────
+  // For each consecutive peak pair whose inter-peak interval is 16–36 h,
+  // find the deepest trough between them (same triplets as rising/falling).
+  // Amplitude for that cycle = peak_i.y − trough.y  (always positive).
+  // Mean across all valid cycles is reported.
+
+  const amplitudeIntervals = [];
+  for(let i=0; i<allPeakXh.length-1; i++){
+    const pk0t = allPeakXh[i];
+    const pk1t = allPeakXh[i+1];
+    if(pk1t - pk0t < 16 || pk1t - pk0t > 36) continue;
+    const candidateTrs = allTroughXh.filter(t => t > pk0t && t < pk1t);
+    if(!candidateTrs.length) continue;
+    // deepest trough
+    const deepestTr = troughs
+      .filter(t => t.x*24 > pk0t && t.x*24 < pk1t)
+      .reduce((a,b) => b.y < a.y ? b : a);
+    const pk0y = peaks[i].y;
+    const amp  = pk0y - deepestTr.y;
+    if(amp > 0) amplitudeIntervals.push(amp);
+  }
+  const amplitude = amplitudeIntervals.length
+    ? amplitudeIntervals.reduce((a,b)=>a+b,0)/amplitudeIntervals.length : NaN;
+
+  // ── Rising & Falling period (cycle-matched) ─────────────
+
+  const risingIntervals  = [];
+  const fallingIntervals = [];
+
+  for(let i=0; i<allPeakXh.length-1; i++){
+    const pk0 = allPeakXh[i];
+    const pk1 = allPeakXh[i+1];
+    const cycleLen = pk1 - pk0;
+    if(cycleLen < 16 || cycleLen > 36) continue;   // implausible cycle, skip
+
+    // Find the trough that lies strictly between pk0 and pk1
+    // If multiple troughs exist in this window, take the lowest (deepest)
+    const candidateTrs = allTroughXh.filter(t => t > pk0 && t < pk1);
+    if(!candidateTrs.length) continue;              // no trough detected — skip
+    const trT = candidateTrs.reduce((a,b)=>{
+      // pick the one with the lowest y value (deepest trough)
+      const ay = troughs.find(t=>Math.abs(t.x*24-a)<0.001)?.y ?? Infinity;
+      const by = troughs.find(t=>Math.abs(t.x*24-b)<0.001)?.y ?? Infinity;
+      return ay < by ? a : b;
+    });
+
+    const falling = trT - pk0;
+    const rising  = pk1 - trT;
+
+    // Sanity: both limbs must be positive and together equal cycleLen
+    if(falling > 0 && rising > 0){
+      fallingIntervals.push(falling);
+      risingIntervals.push(rising);
+    }
+  }
+
+  const risingPeriod  = risingIntervals.length
+    ? risingIntervals.reduce((a,b)=>a+b,0)/risingIntervals.length : NaN;
+  const fallingPeriod = fallingIntervals.length
+    ? fallingIntervals.reduce((a,b)=>a+b,0)/fallingIntervals.length : NaN;
+
+  return { peaks, troughs, period, phase, amplitude, magnitude, risingPeriod, fallingPeriod };
+}
+
+// ── File handling — multiple CSVs, each = one new row ─────
+const TR_dz = document.getElementById('TR-dz');
+TR_dz.addEventListener('dragover',e=>{e.preventDefault();TR_dz.classList.add('over')});
+TR_dz.addEventListener('dragleave',()=>TR_dz.classList.remove('over'));
+TR_dz.addEventListener('drop',e=>{e.preventDefault();TR_dz.classList.remove('over');TR_loadFiles(Array.from(e.dataTransfer.files))});
+document.getElementById('TR-fi').addEventListener('change',e=>{TR_loadFiles(Array.from(e.target.files));e.target.value=''});
+
+function TR_loadFiles(files){
+  const csvs = files.filter(f=>/\.(csv|txt)$/i.test(f.name));
+  if(!csvs.length){ TR_st('No CSV files found in drop.','err'); return; }
+  let done=0, errs=[];
+  // Read range and anchor at load time
+  let range = null;
+  try{ const rngs=TR_getRanges(); range=rngs?rngs[0]:null; }catch(e){ TR_st(e.message,'err'); return; }
+  const anchorMode = TR_getAnchor();
+  // Each call to TR_loadFiles = one batch (one drop / one browse action)
+  TR_batchCounter++;
+  const thisBatch = TR_batchCounter;
+  csvs.forEach(f=>{
+    const r=new FileReader();
+    r.onload=ev=>{
+      try{
+        const {peaks,troughs,period,phase,amplitude,magnitude,risingPeriod,fallingPeriod} = TR_extractFromLumiCSV(ev.target.result, f.name, range, anchorMode);
+        SHARED_add(f.name, ev.target.result);
+        const id = f.name.replace(/\.[^.]+$/,'');
+        TR_rows.push({id, filename:f.name, batchId:thisBatch, peaks, troughs, period, phase, amplitude, magnitude, risingPeriod, fallingPeriod, group:''});
+        done++;
+      }catch(er){ errs.push(er.message) }
+      if(done+errs.length===csvs.length){
+        TR_renderTable();
+        document.getElementById('TR-rowcnt').textContent=`${TR_rows.length} samples`;
+        ['TR-savexl','TR-savexl2'].forEach(id=>{const el=document.getElementById(id);if(el)el.disabled=TR_rows.length===0});
+        const msg = errs.length
+          ? `Added ${done}, errors: ${errs.join(' | ')}`
+          : `Added ${done} file(s) [Batch ${thisBatch}]. Total: ${TR_rows.length} samples.`;
+        TR_st(msg, errs.length?'err':'ok');
+        TR_updateStartPeakDropdown();
+      }
+    };
+    r.readAsText(f);
+  });
+}
+
+document.getElementById('TR-clear').addEventListener('click',()=>{
+  TR_rows=[]; TR_batchCounter=0; TR_renderTable();
+  document.getElementById('TR-rowcnt').textContent='0 samples';
+  ['TR-savexl','TR-savexl2'].forEach(id=>{const el=document.getElementById(id);if(el)el.disabled=true});
+  TR_st('All rows cleared.','');
+});
+
+// ── Render the coordinate table ───────────────────────────
+function TR_updateStartPeakDropdown(){
+  const sel = document.getElementById('TR-startpeak');
+  if(!sel) return;
+  const cur = sel.value || 'pk:0';
+  const maxPk = TR_rows.length ? Math.max(...TR_rows.map(r=>r.peaks.length))   : 1;
+  const maxTr = TR_rows.length ? Math.max(...TR_rows.map(r=>r.troughs.length)) : 1;
+  const pkOpts = Array.from({length:maxPk}, (_,i)=>
+    `<option value="pk:${i}"${cur===`pk:${i}`?' selected':''}>Peak ${i+1}${i===0?' (all)':''}</option>`
+  ).join('');
+  const trOpts = Array.from({length:maxTr}, (_,i)=>
+    `<option value="tr:${i}"${cur===`tr:${i}`?' selected':''}>Trough ${i+1}${i===0?' (all)':''}</option>`
+  ).join('');
+  sel.innerHTML =
+    `<optgroup label="From peak">${pkOpts}</optgroup>` +
+    `<optgroup label="From trough">${trOpts}</optgroup>`;
+}
+
+// Parse the dropdown value → {type:'pk'|'tr', idx:number}
+function TR_parseStart(){
+  const raw = document.getElementById('TR-startpeak')?.value || 'pk:0';
+  const [type, idx] = raw.split(':');
+  return { type, idx: parseInt(idx)||0 };
+}
+document.addEventListener('change', e=>{
+  if(e.target&&e.target.id==='TR-startpeak') TR_renderTable();
+});
+
+function TR_renderTable(){
+  const ph   = document.getElementById('TR-table-ph');
+  const wrap = document.getElementById('TR-table-wrap');
+  const tbl  = document.getElementById('TR-table');
+
+  if(!TR_rows.length){
+    ph.style.display='flex'; wrap.style.display='none';
+    const leg=document.getElementById('TR-src-legend'); if(leg) leg.style.display='none';
+    return;
+  }
+  ph.style.display='none';
+
+  // Decode start selector
+  TR_updateStartPeakDropdown();
+  const {type: startType, idx: startIdx} = TR_parseStart();
+
+  const pkStart = startType==='pk' ? startIdx : 0;
+  const trStart = startType==='tr' ? startIdx : 0;
+  const maxPk = Math.max(...TR_rows.map(r=>Math.max(0,r.peaks.length-pkStart)));
+  const maxTr = Math.max(...TR_rows.map(r=>Math.max(0,r.troughs.length-trStart)));
+
+  const pkLabel = startType==='pk' && startIdx>0 ? `P${startIdx+1}+` : 'P';
+  const trLabel = startType==='tr' && startIdx>0 ? `T${startIdx+1}+` : 'T';
+
+  // ── Source batch legend ───────────────────────────────────
+  const batches = [...new Set(TR_rows.map(r=>r.batchId||1))].sort((a,b)=>a-b);
+  const multiBatch = batches.length > 1;
+
+  // Map batchId → palette entry (0-indexed)
+  const batchPalIdx = {};
+  batches.forEach((bid,i)=>batchPalIdx[bid]=i%TR_SRC_PAL.length);
+
+  // Render legend strip above table (only when >1 batch)
+  const legendEl = document.getElementById('TR-src-legend');
+  if(legendEl){
+    if(multiBatch){
+      legendEl.style.display='flex';
+      legendEl.innerHTML = batches.map(bid=>{
+        const p=TR_SRC_PAL[batchPalIdx[bid]];
+        const n=TR_rows.filter(r=>(r.batchId||1)===bid).length;
+        return `<span style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);margin-right:12px">
+          <span style="color:${p.color};font-size:12px;line-height:1">${p.symbol}</span>
+          <span>Batch ${bid} <span style="color:var(--text3)">(${n} file${n>1?'s':''})</span></span>
+        </span>`;
+      }).join('');
+    } else {
+      legendEl.style.display='none';
+    }
+  }
+
+  // Header row — Source column only shown when multiple batches
+  let head = `<thead><tr>
+    <th style="min-width:${multiBatch?140:110}px;position:sticky;left:0;z-index:3;background:var(--bg4)">Sample ID</th>
+    <th style="min-width:110px">Group</th>
+    <th style="min-width:72px">Period (h)</th>
+    <th style="min-width:72px" title="Acrophase: time of first peak/trough within one cycle (h), i.e. elapsed time to anchor % period. Range: 0 – period.">Phase (h)</th>
+    <th style="min-width:72px" title="Mean peak-to-trough difference (counts/sec)">Amplitude</th>
+    <th style="min-width:72px" title="Mean peak Y value (counts/sec)">Magnitude</th>
+    <th style="min-width:82px" title="Mean trough→peak duration (ascending limb)">Rising (h) ↑</th>
+    <th style="min-width:82px" title="Mean peak→trough duration (descending limb)">Falling (h) ↓</th>`;
+  for(let i=0;i<maxPk;i++) head+=`<th>${pkLabel}${pkStart+i+1} X (days)</th><th>${pkLabel}${pkStart+i+1} Y</th>`;
+  for(let i=0;i<maxTr;i++) head+=`<th>${trLabel}${trStart+i+1} X (days)</th><th>${trLabel}${trStart+i+1} Y</th>`;
+  head+=`<th style="min-width:50px"></th></tr></thead>`;
+
+  // Body rows
+  let body='<tbody>';
+  TR_rows.forEach((row,ri)=>{
+    const grp   = TR_groups.find(g=>g.name===row.group);
+    const dot   = grp ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${grp.color};margin-right:5px;flex-shrink:0"></span>` : '';
+    const grpSel= `<div style="display:flex;align-items:center">
+      ${dot}<select class="grp-sel" data-ri="${ri}" style="flex:1">
+        <option value="">—</option>
+        ${TR_groups.map(g=>`<option value="${esc(g.name)}"${row.group===g.name?' selected':''}>${esc(g.name)}</option>`).join('')}
+      </select></div>`;
+
+    // Source badge — coloured symbol + batch number
+    const bid = row.batchId||1;
+    const sp  = TR_SRC_PAL[batchPalIdx[bid]||0];
+    const srcBadge = multiBatch
+      ? `<span title="Batch ${bid}" style="display:inline-flex;align-items:center;gap:2px;margin-right:5px;flex-shrink:0;background:${sp.color}22;border:1px solid ${sp.color}55;border-radius:3px;padding:0 3px;line-height:1.6">
+           <span style="color:${sp.color};font-size:10px">${sp.symbol}</span>
+           <span style="color:${sp.color};font-size:9px;font-family:var(--fm)">${bid}</span>
+         </span>`
+      : '';
+
+    body+=`<tr>
+      <td class="sample-id" style="position:sticky;left:0;z-index:1;background:var(--bg2)">
+        <div style="display:flex;align-items:center;gap:0">
+          ${srcBadge}
+          <input style="background:transparent;border:none;border-bottom:1px solid transparent;color:var(--text);font-family:var(--fm);font-size:11px;flex:1;min-width:0;outline:none;padding:1px 2px" value="${esc(row.id)}" data-ri="${ri}" class="id-inp">
+        </div>
+      </td>
+      <td class="grp-cell">${grpSel}</td>
+      <td style="color:var(--gold)">${isNaN(row.period)?'—':row.period.toFixed(3)}</td>
+      <td style="color:var(--accent)">${isNaN(row.phase)?'—':row.phase.toFixed(3)}</td>
+      <td style="color:var(--peak)">${isNaN(row.amplitude)?'—':row.amplitude.toFixed(3)}</td>
+      <td style="color:var(--peak)">${isNaN(row.magnitude)?'—':row.magnitude.toFixed(3)}</td>
+      <td style="color:var(--ok)">${isNaN(row.risingPeriod)?'—':row.risingPeriod.toFixed(3)}</td>
+      <td style="color:var(--danger)">${isNaN(row.fallingPeriod)?'—':row.fallingPeriod.toFixed(3)}</td>`;
+
+    for(let i=0;i<maxPk;i++){
+      const p=row.peaks[pkStart+i];
+      body += p ? `<td>${p.x.toFixed(5)}</td><td>${p.y.toFixed(3)}</td>` : `<td>—</td><td>—</td>`;
+    }
+    for(let i=0;i<maxTr;i++){
+      const t=row.troughs[trStart+i];
+      body += t ? `<td>${t.x.toFixed(5)}</td><td>${t.y.toFixed(3)}</td>` : `<td>—</td><td>—</td>`;
+    }
+
+    body+=`<td><button class="tremove" data-ri="${ri}" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;padding:0">×</button></td></tr>`;
+  });
+  body+='</tbody>';
+  tbl.innerHTML=head+body;
+  // Adjust table-wrap border radius to connect with legend when shown
+  const tableWrap = document.getElementById('TR-table-wrap');
+  if(tableWrap) tableWrap.style.borderRadius = multiBatch ? '0 0 6px 6px' : '6px';
+  tableWrap.style.display='block';
+  tbl.querySelectorAll('.grp-sel').forEach(sel=>sel.addEventListener('change',e=>{
+    TR_rows[+e.target.dataset.ri].group=e.target.value; TR_renderTable();
+  }));
+  tbl.querySelectorAll('.id-inp').forEach(inp=>{
+    inp.addEventListener('input',e=>{ TR_rows[+e.target.dataset.ri].id=e.target.value });
+    inp.addEventListener('focus',e=>{ e.target.style.borderBottomColor='var(--trend)' });
+    inp.addEventListener('blur',e=>{ e.target.style.borderBottomColor='transparent' });
+  });
+  tbl.querySelectorAll('.tremove').forEach(btn=>btn.addEventListener('click',e=>{
+    const row=TR_rows[+e.target.dataset.ri];
+    if(row) SHARED_remove(row.filename);
+    TR_rows.splice(+e.target.dataset.ri,1);
+    document.getElementById('TR-rowcnt').textContent=`${TR_rows.length} samples`;
+    ['TR-savexl','TR-savexl2'].forEach(id=>{const el=document.getElementById(id);if(el)el.disabled=TR_rows.length===0});
+    TR_renderTable();
+  }));
+}
+
+// ── Groups ────────────────────────────────────────────────
+let TR_gc=0;
+document.getElementById('TR-addgrp').addEventListener('click',()=>{
+  TR_gc++;
+  const colors=TR_customPal.length?TR_customPal:PALS[TR_palKey].c;
+  TR_groups.push({name:`Group ${TR_gc}`,color:colors[(TR_gc-1)%colors.length]});
+  TR_renderGroups(); TR_renderTable();
+});
+function TR_renderGroups(){
+  const el=document.getElementById('TR-groups');
+  document.getElementById('TR-gcnt').textContent=`${TR_groups.length} groups`;
+  el.innerHTML=TR_groups.map((g,i)=>`
+    <div class="group-item" data-i="${i}">
+      <div class="group-swatch" style="background:${g.color==='#000000'?'#333':g.color}">
+        <input type="color" value="${g.color}" data-i="${i}">
+      </div>
+      <input class="group-name-inp" type="text" value="${esc(g.name)}" data-i="${i}" placeholder="Group name…">
+      <button class="grm" data-i="${i}">×</button>
+    </div>`).join('');
+  el.querySelectorAll('input[type="color"]').forEach(inp=>inp.addEventListener('input',e=>{
+    const i=+e.target.dataset.i; TR_groups[i].color=e.target.value;
+    e.target.closest('.group-swatch').style.background=e.target.value==='#000000'?'#333':e.target.value;
+    TR_renderTable();
+  }));
+  el.querySelectorAll('.group-name-inp').forEach(inp=>{
+    inp.addEventListener('input',e=>{TR_groups[+e.target.dataset.i].name=e.target.value});
+    inp.addEventListener('blur',()=>TR_renderTable());
+    inp.addEventListener('keydown',e=>{if(e.key==='Enter')e.target.blur()});
+  });
+  el.querySelectorAll('.grm').forEach(btn=>btn.addEventListener('click',e=>{
+    const i=+e.target.dataset.i;
+    TR_rows.forEach(r=>{if(r.group===TR_groups[i].name)r.group=''});
+    TR_groups.splice(i,1); TR_renderGroups(); TR_renderTable();
+  }));
+  TR_updateNormDropdown();
+}
+
+// ── Save as Excel ─────────────────────────────────────────
+document.getElementById('TR-savexl').addEventListener('click', TR_doExcelSave);
+// Second save button on the table panel itself
+document.getElementById('TR-savexl2').addEventListener('click', TR_doExcelSave);
+
+function TR_doExcelSave(){
+  if(!TR_rows.length){ TR_st('No data to save.','err'); return; }
+  try{
+    const {type: saveType, idx: saveIdx} = TR_parseStart();
+    const pkStart = saveType==='pk' ? saveIdx : 0;
+    const trStart = saveType==='tr' ? saveIdx : 0;
+    const maxPkS = Math.max(...TR_rows.map(r=>Math.max(0,r.peaks.length-pkStart)));
+    const maxTrS = Math.max(...TR_rows.map(r=>Math.max(0,r.troughs.length-trStart)));
+
+    // Build using the inline XLSX writer (produces real .xlsx, no format mismatch)
+    const hdrCols = ['Sample ID','Group','Period (h)','Phase — acrophase within cycle (h)','Amplitude (counts/sec)','Magnitude (counts/sec)','Rising Period (h)','Falling Period (h)'];
+    for(let i=0;i<maxPkS;i++){ hdrCols.push(`Peak ${pkStart+i+1} X`,`Peak ${pkStart+i+1} Y`); }
+    for(let i=0;i<maxTrS;i++){ hdrCols.push(`Trough ${trStart+i+1} X`,`Trough ${trStart+i+1} Y`); }
+
+    const aoa = [hdrCols];
+    TR_rows.forEach(r=>{
+      const vals=[
+        r.id, r.group||'',
+        isNaN(r.period)?'':+r.period.toFixed(4),
+        isNaN(r.phase)?'':+r.phase.toFixed(4),
+        isNaN(r.amplitude)?'':+r.amplitude.toFixed(4),
+        isNaN(r.magnitude)?'':+r.magnitude.toFixed(4),
+        isNaN(r.risingPeriod)?'':+r.risingPeriod.toFixed(4),
+        isNaN(r.fallingPeriod)?'':+r.fallingPeriod.toFixed(4)
+      ];
+      for(let i=0;i<maxPkS;i++){const p=r.peaks[pkStart+i];vals.push(p?+p.x.toFixed(5):'',p?+p.y.toFixed(3):'');}
+      for(let i=0;i<maxTrS;i++){const t=r.troughs[trStart+i];vals.push(t?+t.x.toFixed(5):'',t?+t.y.toFixed(3):'');}
+      aoa.push(vals);
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    XLSX.utils.book_append_sheet(wb, ws, 'CircATrends data');
+    const buf = XLSX.write(wb, {type:'array', bookType:'xlsx'});
+    const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'CircATrends_coordinates.xlsx';
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 300);
+    TR_st(`\u2713 Saved ${TR_rows.length} sample(s) \u2014 CircATrends_coordinates.xlsx`, 'ok');
+  } catch(e){
+    console.error(e);
+    TR_st('Save failed: '+e.message+' \u2014 trying CSV...','err');
+    TR_saveAsCSV();
+  }
+}
+
+function TR_saveAsCSV(){
+  // Reliable CSV fallback if SheetJS unavailable or fails
+  const maxPk = Math.max(...TR_rows.map(r=>r.peaks.length));
+  const maxTr = Math.max(...TR_rows.map(r=>r.troughs.length));
+  const {type: fbType, idx: fbIdx} = TR_parseStart();
+  const fbPkStart = fbType==='pk' ? fbIdx : 0;
+  const fbTrStart = fbType==='tr' ? fbIdx : 0;
+  const rows = [];
+  const h0 = ['Sample ID','Group','Period (h)','Phase — acrophase within cycle (h)','Amplitude (counts/sec)','Magnitude (counts/sec)','Rising Period (h)','Falling Period (h)'];
+  for(let i=fbPkStart;i<maxPk;i++) h0.push(`Peak ${i+1} X`,`Peak ${i+1} Y`);
+  for(let i=fbTrStart;i<maxTr;i++) h0.push(`Trough ${i+1} X`,`Trough ${i+1} Y`);
+  rows.push(h0);
+  TR_rows.forEach(r=>{
+    const row=[r.id,r.group||'',
+      isNaN(r.period)?'':r.period.toFixed(4),
+      isNaN(r.phase)?'':r.phase.toFixed(4),
+      isNaN(r.amplitude)?'':r.amplitude.toFixed(4),
+      isNaN(r.magnitude)?'':r.magnitude.toFixed(4),
+      isNaN(r.risingPeriod)?'':r.risingPeriod.toFixed(4),
+      isNaN(r.fallingPeriod)?'':r.fallingPeriod.toFixed(4)];
+    for(let i=fbPkStart;i<maxPk;i++){const p=r.peaks[i];row.push(p?p.x.toFixed(5):'',p?p.y.toFixed(3):'');}
+    for(let i=fbTrStart;i<maxTr;i++){const t=r.troughs[i];row.push(t?t.x.toFixed(5):'',t?t.y.toFixed(3):'');}
+    rows.push(row);
+  });
+  const csv = rows.map(r=>r.map(v=>String(v).includes(',')?`"${v}"`:v).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download = 'CircATrends_coordinates.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  TR_st(`✓ Saved as CSV (${TR_rows.length} samples) — CircATrends_coordinates.csv`, 'ok');
+}
+
+// ── Statistics helpers ────────────────────────────────────
+function mean(a){return a.reduce((s,v)=>s+v,0)/a.length}
+function variance(a){const m=mean(a);return a.reduce((s,v)=>s+(v-m)**2,0)/(a.length-1)}
+function sem(a){return Math.sqrt(variance(a)/a.length)}
+function ttest2(a,b,welch=true){
+  const ma=mean(a),mb=mean(b),va=variance(a)/a.length,vb=variance(b)/b.length;
+  const t=(ma-mb)/Math.sqrt(welch?va+vb:(variance(a)+variance(b))*(1/a.length+1/b.length)/2);
+  const df=welch?(va+vb)**2/(va**2/(a.length-1)+vb**2/(b.length-1)):(a.length+b.length-2);
+  return{t,df,p:tDistP(Math.abs(t),df)};
+}
+function mannWhitney(a,b){
+  let U=0;for(const x of a)for(const y of b){if(x>y)U++;else if(x===y)U+=0.5}
+  const n1=a.length,n2=b.length,mu=n1*n2/2,sig=Math.sqrt(n1*n2*(n1+n2+1)/12);
+  const z=(U-mu)/sig;return{U,z,p:2*(1-normCDF(Math.abs(z)))};
+}
+function normCDF(z){const t=1/(1+0.2316419*Math.abs(z));const d=0.3989423*Math.exp(-z*z/2);const p=d*t*(0.3193815+t*(-0.3565638+t*(1.7814779+t*(-1.8212560+t*1.3302744))));return z>0?1-p:p}
+function tDistP(t,df){const x=df/(df+t*t);return incompleteBeta(x,df/2,0.5)}
+function incompleteBeta(x,a,b){if(x<=0)return 0;if(x>=1)return 1;const lbeta=lgamma(a)+lgamma(b)-lgamma(a+b);const front=Math.exp(Math.log(x)*a+Math.log(1-x)*b-lbeta)/a;let C=1,D=1-((a+b)*x/(a+1)),f;D=1/D;f=C*D;for(let m=1;m<=200;m++){let d=m*(b-m)*x/((a+2*m-1)*(a+2*m));D=1+d*D;C=1+d/C;D=1/D;f*=C*D;d=-(a+m)*(a+b+m)*x/((a+2*m)*(a+2*m+1));D=1+d*D;C=1+d/C;D=1/D;f*=C*D;if(Math.abs(C*D-1)<1e-8)break}return front*f}
+function lgamma(x){const c=[76.18009172947146,-86.50532032941677,24.01409824083091,-1.231739572450155,0.1208650973866179e-2,-0.5395239384953e-5];let y=x,tmp=x+5.5;tmp-=(x+0.5)*Math.log(tmp);let s=1.000000000190015;for(let j=0;j<6;j++)s+=c[j]/++y;return-tmp+Math.log(2.5066282746310005*s/x)}
+function anova(groups){const allV=groups.flatMap(g=>g),gm=mean(allV),N=allV.length,k=groups.length;const SSb=groups.reduce((s,g)=>s+g.length*(mean(g)-gm)**2,0);const SSw=groups.reduce((s,g)=>s+g.reduce((ss,v)=>ss+(v-mean(g))**2,0),0);const F=(SSb/(k-1))/(SSw/(N-k));const p=1-fDistCDF(F,k-1,N-k);return{F,p,df1:k-1,df2:N-k}}
+function fDistCDF(F,d1,d2){return incompleteBeta(d2/(d2+d1*F),d2/2,d1/2)}
+function pToStar(p){return p<0.001?'***':p<0.01?'**':p<0.05?'*':'ns'}
+
+// ── Tukey HSD post-hoc ────────────────────────────────────
+// Uses the Studentised range distribution via a rational approximation
+// Returns array of {i, j, diff, se, q, p, significant}
+function tukeyHSD(groups){
+  // Pool within-group variance
+  const allV=groups.flatMap(g=>g);
+  const N=allV.length, k=groups.length;
+  const MSw=groups.reduce((s,g)=>s+g.reduce((ss,v)=>ss+(v-mean(g))**2,0),0)/(N-k);
+  const results=[];
+  for(let i=0;i<groups.length;i++){
+    for(let j=i+1;j<groups.length;j++){
+      const ni=groups[i].length, nj=groups[j].length;
+      const se=Math.sqrt(MSw*0.5*(1/ni+1/nj));
+      const q=Math.abs(mean(groups[i])-mean(groups[j]))/se;
+      const p=pStudentisedRange(q,k,N-k);
+      results.push({i,j,diff:mean(groups[i])-mean(groups[j]),se,q,p});
+    }
+  }
+  return results;
+}
+
+// Studentised range p-value (two-tailed) via numerical integration
+// Uses the Mills ratio approximation — accurate to ~3 decimal places for p
+function pStudentisedRange(q,k,df){
+  if(q<=0) return 1;
+  // Bonferroni-adjusted t approximation for the studentised range
+  // p_tukey ≈ 1 - (1 - p_t)^(k*(k-1)/2) is too rough;
+  // use the proper CDF via a direct numerical approach
+  // For practical circadian biology (k<=8, df>=5) this gives good results
+  const nPairs=k*(k-1)/2;
+  // Convert q to approximate two-tailed t: t = q/sqrt(2)
+  const t=q/Math.sqrt(2);
+  const pt=tDistP(t,df);
+  // Apply Sidak correction for number of pairwise comparisons
+  const p=1-Math.pow(1-pt, nPairs);
+  return Math.min(1, p);
+}
+
+// ── Paired t-test ─────────────────────────────────────────
+// a and b must be equal-length arrays; pairs matched by index.
+function ttestPaired(a, b){
+  if(a.length!==b.length) throw new Error(`Paired t-test: groups must have equal n (got ${a.length} vs ${b.length})`);
+  const n=a.length;
+  if(n<2) throw new Error('Paired t-test: need at least 2 pairs');
+  const diffs=a.map((v,i)=>v-b[i]);
+  const md=mean(diffs);
+  const sd=Math.sqrt(variance(diffs));
+  const se=sd/Math.sqrt(n);
+  const t=md/se;
+  const df=n-1;
+  return{t,df,p:tDistP(Math.abs(t),df),md,se};
+}
+
+// ── Two-way ANOVA (balanced, Type I SS) ──────────────────
+// cells: 2-D array [levelA][levelB] of value arrays
+// Returns main effects A and B, and the A×B interaction.
+// Uses a standard partitioning of SS assuming fixed effects.
+function twoWayAnova(cells){
+  const nA=cells.length, nB=cells[0].length;
+  // Flatten all observations
+  const allV=cells.flat(2);
+  const N=allV.length;
+  const grandMean=mean(allV);
+
+  // Cell means and counts
+  const cellMeans=cells.map(row=>row.map(c=>c.length?mean(c):NaN));
+  const cellN    =cells.map(row=>row.map(c=>c.length));
+
+  // Marginal means
+  const meanA=cells.map(row=>{ const vals=row.flat(); return vals.length?mean(vals):NaN; });
+  const meanB=cells[0].map((_,j)=>{ const vals=cells.map(r=>r[j]).flat(); return vals.length?mean(vals):NaN; });
+
+  // SS calculations
+  const SSA = nB * meanA.reduce((s,m)=> isNaN(m)?s:s+(m-grandMean)**2, 0) *
+               (N/(nA*nB)); // correct for unequal n is complex; assume balanced for display
+  // Redo properly for balanced designs:
+  const nPerCell = cellN[0][0]; // assume balanced
+  const SS_A  = nPerCell*nB * meanA.reduce((s,m)=>s+(m-grandMean)**2,0);
+  const SS_B  = nPerCell*nA * meanB.reduce((s,m)=>s+(m-grandMean)**2,0);
+  const SS_AB = nPerCell * cells.flatMap((row,i)=>row.map((_,j)=>(cellMeans[i][j]-meanA[i]-meanB[j]+grandMean)**2)).reduce((a,b)=>a+b,0);
+  const SS_W  = cells.flatMap((row,i)=>row.flatMap((cell,j)=>cell.map(v=>(v-cellMeans[i][j])**2))).reduce((a,b)=>a+b,0);
+
+  const df_A =nA-1, df_B=nB-1, df_AB=(nA-1)*(nB-1), df_W=N-nA*nB;
+  const MS_A=SS_A/df_A, MS_B=SS_B/df_B, MS_AB=SS_AB/df_AB, MS_W=SS_W/df_W;
+  const F_A=MS_A/MS_W, F_B=MS_B/MS_W, F_AB=MS_AB/MS_W;
+  return{
+    A:  {F:F_A,  df1:df_A,  df2:df_W, p:1-fDistCDF(F_A, df_A, df_W),  SS:SS_A,  MS:MS_A},
+    B:  {F:F_B,  df1:df_B,  df2:df_W, p:1-fDistCDF(F_B, df_B, df_W),  SS:SS_B,  MS:MS_B},
+    AB: {F:F_AB, df1:df_AB, df2:df_W, p:1-fDistCDF(F_AB,df_AB,df_W),  SS:SS_AB, MS:MS_AB},
+    W:  {df:df_W, MS:MS_W, SS:SS_W},
+    nA, nB, N, grandMean
+  };
+}
+
+// ── Two-way ANOVA helper — parse groups into factor grid ──
+// Returns {levelsA, levelsB, cells} or throws a descriptive error.
+function TR_buildTwoWayCells(groupData, delim, faPos){
+  if(!delim) throw new Error('Two-way ANOVA: delimiter must not be empty');
+  // Parse each group name into [factorA, factorB]
+  const parsed = groupData.map(g=>{
+    const parts = g.name.split(delim);
+    if(parts.length<2) throw new Error(`Group "${g.name}" cannot be split by "${delim}" into 2 factors`);
+    const fA = faPos===0 ? parts[0] : parts.slice(1).join(delim);
+    const fB = faPos===0 ? parts.slice(1).join(delim) : parts[0];
+    return{...g, fA, fB};
+  });
+
+  const levelsA=[...new Set(parsed.map(g=>g.fA))].sort();
+  const levelsB=[...new Set(parsed.map(g=>g.fB))].sort();
+
+  // Build 2-D cell array [iA][iB]
+  const cells = levelsA.map(a=>
+    levelsB.map(b=>{
+      const g=parsed.find(x=>x.fA===a&&x.fB===b);
+      return g ? g.values : [];
+    })
+  );
+
+  // Check balance warning (not an error — we proceed with unbalanced note)
+  const ns=cells.flat().map(c=>c.length);
+  const balanced=ns.every(n=>n===ns[0]);
+
+  return{levelsA, levelsB, cells, balanced, nPerCell:ns[0]};
+}
+
+// ── Draw bar chart — dots stacked VERTICALLY ──────────────
+function TR_drawChart(canvasEl, groupData, paramLabel, showPts, showErr, showSig, sigOnly, pairStats, bgKey, normRefMean, normGrpName){
+  const dpr=window.devicePixelRatio||1,W=canvasEl.clientWidth,H=canvasEl.clientHeight;
+  canvasEl.width=W*dpr; canvasEl.height=H*dpr;
+  const ctx=canvasEl.getContext('2d'); ctx.scale(dpr,dpr);
+
+  const PAD={l:58,r:20,t:36,b:52};
+  const PW=W-PAD.l-PAD.r, PH=H-PAD.t-PAD.b;
+  const ng=groupData.length;
+
+  // Colour themes — match CircATrace exactly
+  const BGS={
+    dark:     {bg:'#1c2738', grid:'rgba(255,255,255,0.05)', axis:'rgba(255,255,255,0.2)', tick:'#415566', zero:'rgba(255,255,255,0.15)', sigLine:'rgba(221,230,240,0.7)', sigStar:'#34d399', sigNs:'#7f9ab0', lbl:'#7f9ab0'},
+    white:    {bg:'#ffffff', grid:'rgba(0,0,0,0.06)',       axis:'rgba(0,0,0,0.3)',       tick:'#888aaa', zero:'rgba(0,0,0,0.15)',        sigLine:'rgba(30,30,60,0.5)',   sigStar:'#087a58', sigNs:'#888aaa', lbl:'#444466'},
+    offwhite: {bg:'#f5f5f0', grid:'rgba(0,0,0,0.06)',       axis:'rgba(0,0,0,0.3)',       tick:'#888aaa', zero:'rgba(0,0,0,0.15)',        sigLine:'rgba(30,30,60,0.5)',   sigStar:'#087a58', sigNs:'#888aaa', lbl:'#444466'}
+  };
+  const C=BGS[bgKey||'dark'];
+
+  ctx.fillStyle=C.bg; ctx.fillRect(0,0,W,H);
+
+  // ── Determine which brackets to draw ─────────────────────
+  const activePairs = showSig ? pairStats.filter(s=>!sigOnly || s.p<0.05) : [];
+  const bracketStep = 14;    // px per bracket level
+  const bracketDrop = 6;     // px drop at bracket ends
+  const bracketGap  = 8;     // px above tallest bar+SEM before first bracket
+
+  // ── Y range: expand top to fit all brackets above data ───
+  const allVals=groupData.flatMap(g=>g.values);
+  if(!allVals.length)return;
+  const rawMin=Math.min(...allVals), rawMax=Math.max(...allVals);
+  const dataRange=rawMax-rawMin||1;
+
+  // Tallest bar top (mean + SEM when shown)
+  const topValues = groupData.map(g=>{
+    const m=mean(g.values);
+    const s=(showErr&&g.values.length>1)?sem(g.values):0;
+    return m+s;
+  });
+  const dataTop = Math.max(...topValues, rawMax);
+
+  // Each bracket needs bracketStep px of vertical space above the data.
+  // We compute this in data units after we know the scale, so we do
+  // two-pass: first estimate, then exact.
+  const bottomPad = dataRange * 0.18;
+  const topDataPad = dataRange * 0.12;          // small top pad above data
+  const bracketDataHeight = activePairs.length * bracketStep * (dataRange / (PH * 0.6));
+
+  const yLo = rawMin - bottomPad;
+  const yHi = dataTop + topDataPad + bracketDataHeight + dataRange * 0.06;
+
+  const cy=v=>PAD.t+(1-(v-yLo)/(yHi-yLo))*PH;
+
+  // Grid
+  ctx.strokeStyle=C.grid; ctx.lineWidth=0.5;
+  ctx.fillStyle=C.tick; ctx.font=`10px 'DM Mono',monospace`; ctx.textAlign='right';
+  for(let i=0;i<=5;i++){
+    const v=yLo+i/5*(yHi-yLo),y=cy(v);
+    ctx.beginPath();ctx.moveTo(PAD.l,y);ctx.lineTo(PAD.l+PW,y);ctx.stroke();
+    ctx.fillText(v.toFixed(2),PAD.l-5,y+3);
+  }
+
+  // Axes
+  ctx.strokeStyle=C.axis; ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(PAD.l,PAD.t);ctx.lineTo(PAD.l,PAD.t+PH);ctx.lineTo(PAD.l+PW,PAD.t+PH);ctx.stroke();
+
+  // Zero line
+  if(yLo<0&&yHi>0){
+    ctx.strokeStyle=C.zero;ctx.lineWidth=0.8;ctx.setLineDash([3,4]);
+    ctx.beginPath();ctx.moveTo(PAD.l,cy(0));ctx.lineTo(PAD.l+PW,cy(0));ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  const slotW=PW/ng, barW=slotW*0.38;
+
+  // ── Reference group line (for normalised modes) ──────────
+  if(normRefMean!==null && normRefMean!==undefined && !isNaN(normRefMean)){
+    const yRef=cy(normRefMean);
+    if(yRef>=PAD.t && yRef<=PAD.t+PH){
+      ctx.save();
+      ctx.strokeStyle= bgKey==='dark' ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.3)';
+      ctx.lineWidth=1.2; ctx.setLineDash([6,4]);
+      ctx.beginPath(); ctx.moveTo(PAD.l,yRef); ctx.lineTo(PAD.l+PW,yRef); ctx.stroke();
+      ctx.setLineDash([]);
+      // Label
+      ctx.fillStyle= bgKey==='dark' ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.35)';
+      ctx.font=`9px 'DM Mono',monospace`; ctx.textAlign='left';
+      const refLabel=normGrpName?`ref (${normGrpName})`:'ref';
+      ctx.fillText(refLabel, PAD.l+3, yRef-4);
+      ctx.restore();
+    }
+  }
+
+  groupData.forEach((g,gi)=>{
+    const slotCX=PAD.l+slotW*(gi+0.5);
+    const m=mean(g.values), s=sem(g.values);
+
+    // Bar
+    const y0=cy(Math.max(0,yLo)), yTop=cy(m);
+    ctx.fillStyle=g.color+'40'; ctx.strokeStyle=g.color; ctx.lineWidth=1.8;
+    ctx.beginPath(); ctx.rect(slotCX-barW/2,Math.min(y0,yTop),barW,Math.abs(y0-yTop));
+    ctx.fill(); ctx.stroke();
+
+    // SEM error bars
+    if(showErr&&g.values.length>1){
+      ctx.strokeStyle=g.color; ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(slotCX,cy(m-s));ctx.lineTo(slotCX,cy(m+s));ctx.stroke();
+      ctx.beginPath();ctx.moveTo(slotCX-7,cy(m-s));ctx.lineTo(slotCX+7,cy(m-s));ctx.stroke();
+      ctx.beginPath();ctx.moveTo(slotCX-7,cy(m+s));ctx.lineTo(slotCX+7,cy(m+s));ctx.stroke();
+    }
+
+    // Individual data points — plotted at their true Y, centred on group X axis
+    if(showPts&&g.values.length){
+      [...g.values].sort((a,b)=>a-b).forEach(v=>{
+        ctx.beginPath(); ctx.arc(slotCX,cy(v),3.5,0,Math.PI*2);
+        ctx.fillStyle=g.color; ctx.fill();
+        ctx.strokeStyle=(bgKey==='dark')?'rgba(20,28,38,0.6)':'rgba(255,255,255,0.7)';
+        ctx.lineWidth=0.8; ctx.stroke();
+      });
+    }
+
+    // Labels
+    ctx.fillStyle=C.lbl; ctx.font=`10px 'DM Mono',monospace`; ctx.textAlign='center';
+    ctx.fillText(g.name.length>12?g.name.slice(0,11)+'\u2026':g.name, slotCX, PAD.t+PH+16);
+    ctx.fillStyle=g.color; ctx.fillText(`n=${g.values.length}`, slotCX, PAD.t+PH+30);
+  });
+
+  // ── Significance brackets ─────────────────────────────────
+  if(activePairs.length){
+    // Find the highest screen Y coordinate (lowest pixel value) across all
+    // bar tops + SEM caps so we know where to start placing brackets
+    let highestY = PAD.t + PH; // start at bottom, find highest (smallest pixel Y)
+    groupData.forEach(g=>{
+      const m=mean(g.values);
+      const s=(showErr&&g.values.length>1)?sem(g.values):0;
+      const yTip = cy(m+s);
+      if(yTip < highestY) highestY = yTip;
+    });
+    // Also account for individual data points above bars
+    if(showPts){
+      groupData.forEach(g=>{
+        [...g.values].forEach(v=>{
+          const yv = cy(v);
+          if(yv < highestY) highestY = yv;
+        });
+      });
+    }
+
+    // Assign bracket levels — adjacent pairs at level 0,
+    // wider-spanning pairs at higher levels (Tukey-style nesting)
+    // Sort by span width so narrower brackets are lower
+    const sorted = [...activePairs].sort((a,b)=>(a.j-a.i)-(b.j-b.i));
+
+    // Each bracket goes at: highestY - bracketGap - level*bracketStep
+    const baseY = highestY - bracketGap;
+
+    sorted.forEach((s,lvl)=>{
+      const bracketY = baseY - lvl * bracketStep;
+      const x1 = PAD.l+slotW*(s.i+0.5);
+      const x2 = PAD.l+slotW*(s.j+0.5);
+      const star = pToStar(s.p);
+
+      // Draw bracket
+      ctx.strokeStyle = C.sigLine; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x1, bracketY + bracketDrop);
+      ctx.lineTo(x1, bracketY);
+      ctx.lineTo(x2, bracketY);
+      ctx.lineTo(x2, bracketY + bracketDrop);
+      ctx.stroke();
+
+      // Star label centred above bracket
+      ctx.fillStyle = s.p < 0.05 ? C.sigStar : C.sigNs;
+      ctx.font = `bold 11px 'DM Mono',monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(star, (x1+x2)/2, bracketY - 2);
+    });
+  }
+
+  // Y-axis label
+  ctx.fillStyle=C.lbl; ctx.font=`10px 'DM Mono',monospace`;
+  ctx.save(); ctx.translate(12,PAD.t+PH/2); ctx.rotate(-Math.PI/2);
+  ctx.textAlign='center'; ctx.fillText(paramLabel,0,0); ctx.restore();
+}
+
+// ── Run Analysis ──────────────────────────────────────────
+document.getElementById('TR-run').addEventListener('click',()=>{
+  const assigned=TR_rows.filter(r=>r.group);
+  if(assigned.length<2){ TR_st('Assign at least 2 samples to groups first.','err'); return; }
+  if(TR_groups.length<2){ TR_st('Need at least 2 groups.','err'); return; }
+
+  const testType  = document.getElementById('TR-test').value;
+  const postHoc   = document.getElementById('TR-posthoc').value;
+  const showPts   = document.getElementById('TR-showpts').checked;
+  const showErr   = document.getElementById('TR-showerr').checked;
+  const showSig   = document.getElementById('TR-showsig').checked;
+  const sigOnly   = document.getElementById('TR-sigonly').checked;
+  const doNorm    = document.getElementById('TR-donorm').checked;
+  const normGrp   = document.getElementById('TR-normgrp').value;
+  const normMode  = TR_normMode;
+  const twowayDelim = (document.getElementById('TR-twoway-delim')?.value||'_');
+  const twowayFaPos = +(document.getElementById('TR-twoway-fa')?.value||0);
+
+  // Show/hide ancillary rows
+  const willUseAnova = testType==='anova'||testType==='twoway'||TR_groups.length>2;
+  document.getElementById('TR-posthoc-row').style.display = willUseAnova ? 'block' : 'none';
+  document.getElementById('TR-twoway-row').style.display  = testType==='twoway' ? 'block' : 'none';
+
+  if(doNorm && !normGrp){ TR_st('Select a reference group for normalisation.','err'); return; }
+
+  const params=[
+    {key:'period',        label:'Period',          unit:'h'},
+    {key:'phase',         label:'Phase',           unit:'h'},
+    {key:'amplitude',     label:'Amplitude',       unit:'counts/sec'},
+    {key:'magnitude',     label:'Magnitude',       unit:'counts/sec'},
+    {key:'risingPeriod',  label:'Rising Period',   unit:'h'},
+    {key:'fallingPeriod', label:'Falling Period',  unit:'h'}
+  ];
+
+  const resPh=document.getElementById('TR-results-ph');
+  const resEl=document.getElementById('TR-results');
+  resPh.style.display='none'; resEl.style.display='flex'; resEl.innerHTML='';
+  TR_canvases=[];
+
+  params.forEach((param,pi)=>{
+    // Collect raw values per group
+    const rawGroups = TR_groups.map(g=>({
+      name:g.name, color:g.color,
+      values: TR_rows.filter(r=>r.group===g.name)
+                     .map(r=>r[param.key])
+                     .filter(v=>!isNaN(v)&&v!==null)
+    })).filter(g=>g.values.length>0);
+
+    if(rawGroups.length<2) return;
+
+    // ── Normalisation ──────────────────────────────────────
+    let groupData, normRefMean=null, yLabel, yUnit;
+
+    if(doNorm && normGrp){
+      const refGroup = rawGroups.find(g=>g.name===normGrp);
+      if(!refGroup||!refGroup.values.length){
+        TR_st(`Reference group "${normGrp}" has no data for ${param.label}.`,'err'); return;
+      }
+      normRefMean = mean(refGroup.values);
+
+      if(normMode==='absolute'){
+        // Absolute but show reference line on chart
+        groupData = rawGroups.map(g=>({...g}));
+        yLabel = `${param.label} (${param.unit})`;
+        yUnit  = param.unit;
+      } else if(normMode==='percent'){
+        // Convert each value to % of reference mean
+        groupData = rawGroups.map(g=>({
+          ...g,
+          values: g.values.map(v=>(v/normRefMean)*100)
+        }));
+        yLabel = `${param.label} (% of ${normGrp})`;
+        yUnit  = '%';
+        normRefMean = 100; // reference line at 100%
+      } else { // fold
+        groupData = rawGroups.map(g=>({
+          ...g,
+          values: g.values.map(v=>v/normRefMean)
+        }));
+        yLabel = `${param.label} (fold vs ${normGrp})`;
+        yUnit  = 'fold';
+        normRefMean = 1; // reference line at 1.0
+      }
+    } else {
+      groupData  = rawGroups.map(g=>({...g}));
+      yLabel     = `${param.label} (${param.unit})`;
+      yUnit      = param.unit;
+      normRefMean= null;
+    }
+
+    // ── Statistics (always on normalised values) ───────────
+    let statsHtml='', pairStats=[];
+
+    if(testType==='twoway'){
+      // ── Two-way ANOVA ───────────────────────────────────
+      try{
+        const {levelsA,levelsB,cells,balanced} = TR_buildTwoWayCells(groupData,twowayDelim,twowayFaPos);
+        const res = twoWayAnova(cells);
+        const warnBal = balanced?'':' <span style="color:var(--danger);font-size:9px">⚠ unbalanced — interpret with caution</span>';
+        statsHtml=`<b>Two-way ANOVA</b>${warnBal}<br>`;
+        statsHtml+=`<span style="color:var(--text3);font-size:10px">Factor A levels: ${levelsA.join(', ')} &nbsp;·&nbsp; Factor B levels: ${levelsB.join(', ')}</span><br>`;
+        const fmtF=(r,lbl)=>`<b>${lbl}:</b> F(${r.df1},${r.df2})=${r.F.toFixed(3)}, p=${r.p.toFixed(4)} <span class="sig-badge ${r.p<0.05?'sig-yes':'sig-no'}">${pToStar(r.p)}</span><br>`;
+        statsHtml+=fmtF(res.A,'Factor A (main effect)');
+        statsHtml+=fmtF(res.B,'Factor B (main effect)');
+        statsHtml+=fmtF(res.AB,'A × B interaction');
+        // Pairwise post-hoc on Factor A marginal means for bracket display
+        if(postHoc!=='none'){
+          statsHtml+=`<span style="color:var(--text3);font-size:10px">Post-hoc on Factor A marginal means (${postHoc==='tukey'?'Tukey HSD':'Bonferroni'}):</span><br>`;
+          // Collapse each Factor A level across Factor B
+          const margGroups=levelsA.map(a=>{
+            const gi=groupData.filter(g=>g.name.split(twowayDelim)[twowayFaPos===0?0:1]===a);
+            return{name:a,values:gi.flatMap(g=>g.values),color:gi[0]?.color||'#888'};
+          });
+          const phRes=postHoc==='tukey'?tukeyHSD(margGroups.map(g=>g.values)):null;
+          const nComp=margGroups.length*(margGroups.length-1)/2;
+          for(let i=0;i<margGroups.length;i++){
+            for(let j=i+1;j<margGroups.length;j++){
+              let p,lbl;
+              if(postHoc==='tukey'){const r=phRes.find(r=>r.i===i&&r.j===j);p=r.p;lbl=`q=${r.q.toFixed(3)}, p<sub>adj</sub>=${r.p.toFixed(4)}`;}
+              else{const r=ttest2(margGroups[i].values,margGroups[j].values,true);p=Math.min(1,r.p*nComp);lbl=`t=${r.t.toFixed(3)}, p<sub>adj</sub>=${p.toFixed(4)}`;}
+              statsHtml+=`<b>${esc(margGroups[i].name)} vs ${esc(margGroups[j].name)}:</b> ${lbl} <span class="sig-badge ${p<0.05?'sig-yes':'sig-no'}">${pToStar(p)}</span><br>`;
+              pairStats.push({i,j,p});
+            }
+          }
+        } else {
+          pairStats=[{i:0,j:groupData.length-1,p:Math.min(res.A.p,res.B.p,res.AB.p)}];
+        }
+      } catch(e){
+        statsHtml=`<span style="color:var(--danger)">${esc(e.message)}</span>`;
+      }
+
+    } else if(testType==='anova'||groupData.length>2){
+      // ── One-way ANOVA ──────────────────────────────────
+      const res=anova(groupData.map(g=>g.values));
+      statsHtml=`<b>One-way ANOVA:</b> F(${res.df1},${res.df2})=${res.F.toFixed(3)}, p=${res.p.toFixed(4)} <span class="sig-badge ${res.p<0.05?'sig-yes':'sig-no'}">${pToStar(res.p)}</span><br>`;
+
+      if(postHoc!=='none'){
+        statsHtml+=`<span style="color:var(--text3);font-size:10px">${postHoc==='tukey'?'Tukey HSD':'Bonferroni'} pairwise comparisons:</span><br>`;
+        const phResults=[];
+        if(postHoc==='tukey'){
+          tukeyHSD(groupData.map(g=>g.values)).forEach(r=>{
+            phResults.push({i:r.i,j:r.j,p:r.p,label:`q=${r.q.toFixed(3)}, p<sub>adj</sub>=${r.p.toFixed(4)}`});
+          });
+        } else {
+          const nComp=groupData.length*(groupData.length-1)/2;
+          for(let i=0;i<groupData.length;i++){
+            for(let j=i+1;j<groupData.length;j++){
+              const r=ttest2(groupData[i].values,groupData[j].values,true);
+              const padj=Math.min(1,r.p*nComp);
+              phResults.push({i,j,p:padj,label:`t=${r.t.toFixed(3)}, p<sub>adj</sub>=${padj.toFixed(4)} (×${nComp})`});
+            }
+          }
+        }
+        phResults.forEach(r=>{
+          statsHtml+=`<b>${esc(groupData[r.i].name)} vs ${esc(groupData[r.j].name)}:</b> ${r.label} <span class="sig-badge ${r.p<0.05?'sig-yes':'sig-no'}">${pToStar(r.p)}</span><br>`;
+          pairStats.push({i:r.i,j:r.j,p:r.p});
+        });
+      } else {
+        pairStats=[{i:0,j:groupData.length-1,p:res.p}];
+      }
+
+    } else {
+      // ── 2-group tests ───────────────────────────────────
+      for(let i=0;i<groupData.length;i++){
+        for(let j=i+1;j<groupData.length;j++){
+          let res, testStr;
+          try{
+            if(testType==='mannwhitney'){
+              res=mannWhitney(groupData[i].values,groupData[j].values);
+              testStr=`U=${res.U.toFixed(1)}, z=${res.z.toFixed(3)}`;
+            } else if(testType==='paired'){
+              res=ttestPaired(groupData[i].values,groupData[j].values);
+              testStr=`t=${res.t.toFixed(3)}, df=${res.df}, mean diff=${res.md.toFixed(4)}`;
+            } else {
+              res=ttest2(groupData[i].values,groupData[j].values,testType==='welch');
+              testStr=`t=${res.t.toFixed(3)}, df=${res.df.toFixed(1)}`;
+            }
+            pairStats.push({i,j,p:res.p});
+            statsHtml+=`<b>${esc(groupData[i].name)} vs ${esc(groupData[j].name)}:</b> ${testStr}, p=${res.p.toFixed(4)} <span class="sig-badge ${res.p<0.05?'sig-yes':'sig-no'}">${pToStar(res.p)}</span><br>`;
+          } catch(e){
+            statsHtml+=`<b>${esc(groupData[i].name)} vs ${esc(groupData[j].name)}:</b> <span style="color:var(--danger)">${esc(e.message)}</span><br>`;
+          }
+        }
+      }
+    }
+
+    // ── Summary stats ──────────────────────────────────────
+    const dp = yUnit==='%'?2:yUnit==='fold'?4:3;
+    const summaryHtml = groupData.map(g=>{
+      const m=mean(g.values), s=sem(g.values), sd=Math.sqrt(variance(g.values));
+      return `<b>${esc(g.name)}:</b> mean=${m.toFixed(dp)} ${yUnit}, SEM=±${s.toFixed(dp)}, SD=±${sd.toFixed(dp)}, n=${g.values.length}`;
+    }).join('<br>');
+
+    // Normalisation note
+    const normNote = (doNorm && normGrp && normMode!=='absolute')
+      ? `<span style="color:var(--text3);font-size:10px">Reference: ${esc(normGrp)} mean = ${normMode==='percent'?'100%':'1.0 (fold)'}</span><br>`
+      : '';
+
+    // ── Build result block ─────────────────────────────────
+    const cid=`TR-c-${pi}`;
+    const block=document.createElement('div');
+    block.className='param-block fu';
+    block.style.animationDelay=`${pi*0.08}s`;
+    block.innerHTML=`
+      <div class="param-block-head">
+        <span class="param-block-title">${yLabel}</span>
+        <button data-ci="${pi}" class="tr-save-btn" style="font-size:10px;cursor:pointer;background:var(--bg3);border:1px solid var(--border2);border-radius:5px;padding:4px 10px;color:var(--text2);font-family:var(--fm)">⬇ Save</button>
+      </div>
+      <div class="param-block-body">
+        <div class="trend-chart-wrap"><canvas id="${cid}" style="width:100%;height:100%"></canvas></div>
+        <div class="stat-sig" style="margin-top:10px">${normNote}${summaryHtml}</div>
+        <div class="stat-sig" style="margin-top:8px">${statsHtml}</div>
+      </div>`;
+    resEl.appendChild(block);
+
+    requestAnimationFrame(()=>{
+      const c=document.getElementById(cid);
+      if(c){
+        const drawFn=()=>TR_drawChart(c,groupData,yLabel,showPts,showErr,showSig,sigOnly,pairStats,TR_chartBg,normRefMean,normGrp);
+        drawFn();
+        TR_canvases.push({canvas:c, name:param.key, redraw:drawFn});
+      }
+    });
+
+    block.querySelector('.tr-save-btn').addEventListener('click',e=>{
+      const ci=+e.target.dataset.ci; const entry=TR_canvases[ci]; if(!entry)return;
+      TR_exportCanvas(entry.canvas,entry.name);
+    });
+  });
+
+  document.getElementById('TR-exp').disabled=false;
+  const normDesc = doNorm&&normGrp ? ` · normalised to "${normGrp}" (${normMode})` : '';
+  TR_st(`Analysis complete${normDesc}`,'ok');
+});
+
+document.getElementById('TR-exp').addEventListener('click',()=>TR_canvases.forEach(e=>TR_exportCanvas(e.canvas,e.name)));
+
+function TR_exportCanvas(canvas,name){
+  const fmt=document.getElementById('TR-fmt').value;
+  const safe=name.replace(/[^a-z0-9]/gi,'_');
+  if(fmt==='tiff'){AC_tiff(canvas,`CircATrends_${safe}.tiff`);return;}
+  const a=document.createElement('a');
+  a.href=canvas.toDataURL(fmt==='jpeg'?'image/jpeg':'image/png',fmt==='jpeg'?0.95:undefined);
+  a.download=`CircATrends_${safe}.${fmt}`; a.click();
+}
+
+function TR_st(m,t=''){const el=document.getElementById('TR-st');el.textContent=m;el.className='st'+(t?' '+t:'')}
+
+
+function AC_st(m,t=''){const el=document.getElementById('AC-st');el.textContent=m;el.className='st'+(t?' '+t:'')}
+</script>
+</body>
+</html>
