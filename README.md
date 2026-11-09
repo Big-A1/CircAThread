@@ -1,9 +1,10 @@
 # CircAThread — Circadian Biology Analysis Suite
 
+
 [![Open in Browser](https://img.shields.io/badge/Open%20CircAThread-Live-blue)](https://big-a1.github.io/CircAThread/CircAThread.html)
  
-**[→ Open CircAThread in your browser](https://big-a1.github.io/CircAThread/CircAThread.html)** · or download `CircAThread.html` and open it locally.
- 
+**[→ Open CircAThread in your browser](https://big-a1.github.io/CircAThread/CircAThread)** · or download `CircAThread` and open it locally.
+
 
  
 
